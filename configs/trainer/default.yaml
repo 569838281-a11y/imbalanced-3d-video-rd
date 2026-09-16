@@ -1,0 +1,35 @@
+#_target_: lightning.pytorch.trainer.Trainer
+
+#default_root_dir: ${paths.output_dir}
+
+#min_epochs: 1 # prevents early stopping
+#max_epochs: 10
+
+#accelerator: cpu
+#devices: 1
+
+# mixed precision for extra speed-up
+# precision: 16
+
+# perform a validation loop every N training epochs
+#check_val_every_n_epoch: 1
+
+# set True to to ensure deterministic results
+# makes training slower but gives more reproducibility than just setting seeds
+#deterministic: False
+
+_target_: lightning.pytorch.trainer.Trainer
+
+default_root_dir: ${paths.output_dir}
+
+min_epochs: 1 
+max_epochs: 50      # 🟢 从 10 改成 50，让模型学得更深
+
+accelerator: gpu    # 🟢 从 cpu 改成 gpu
+devices: 1          # 使用你唯一的那张 4060 显卡
+
+# mixed precision for extra speed-up
+precision: 16-mixed # 🟢 把注释#删掉，改成 16-mixed。显存直接省一半！
+
+check_val_every_n_epoch: 1
+deterministic: False

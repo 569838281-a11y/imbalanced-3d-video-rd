@@ -1,0 +1,118 @@
+================================================================================
+  第三次更改说明 — 单进程训练、实时进度、GPU 侧预处理
+  方法不变：两阶段解耦 + Logit Adjustment + PR 阈值后处理
+================================================================================
+
+一、背景与问题
+--------------------------------------------------------------------------------
+  • 同时存在两个 train.py（PID 4664 与 30056），争抢 8GB 显存与磁盘，表现为“卡住”。
+  • decoupled_train_live.log 长时间不更新：管道缓冲 + 关闭进度条 + 仅 epoch 末打印。
+  • 每 step 在 CPU 上做 trilinear resize，GPU 大量时间在等 DataLoader。
+
+
+二、方法是否改变？
+--------------------------------------------------------------------------------
+  未改变：DecoupledModelModule 两阶段、Mixup、BCE、Logit Adjustment、PR 阈值回调。
+
+  工程改动（非算法）：
+    ✓ 结束重复训练进程，只保留一条任务。
+    ✓ 开启 Lightning 进度条 + TrainingProgressCallback（每 25 step 刷 stdout）。
+    ✓ CPU 仅 PyAV 解码与采样；pad/resize/归一化改在 GPU（on_after_batch_transfer）。
+    ✓ PYTHONUNBUFFERED=1 + python -u，日志实时写入 D:\ERDES\logs\decoupled_train_live.log。
+
+  说明：mp4 解码仍须在 CPU（PyAV）。若要进一步“几乎全在 GPU 上算”，需先执行
+        scripts/build_video_cache.py 后改用 resnet3d_decoupled_fast（见 second_summary）。
+
+
+三、本次修改/新增文件清单
+--------------------------------------------------------------------------------
+
+【新增】
+
+1. erdes/training/gpu_video_ops.py
+   • gpu_preprocess_batch()：GPU 上 pad、trilinear resize、/255 归一化。
+
+2. erdes/callbacks/training_progress_callback.py
+   • 每 log_every_n_steps 打印 step / epoch / batch / stage / train_loss。
+
+3. configs/data/erdes_gpu.yaml
+   • defer_resize=true；num_workers=2；persistent_workers=true。
+
+4. configs/callbacks/training_progress.yaml
+   • 可复用的进度回调配置片段。
+
+5. scripts/start_decoupled_train.ps1
+   • 单进程启动脚本（D: temp、无缓冲日志、GPU 预处理实验）。
+
+6. third_summary.txt（本文件）
+
+
+【修改】
+
+7. erdes/data/components/erdes_dataset.py
+   • VideoDataset(defer_resize)：为 true 时跳过 CPU resize/归一化。
+
+8. erdes/data/collate.py
+   • pad_video_batch_collate：defer_resize 时按 batch 内最大 D/H/W 做 CPU pad，再送 GPU resize。
+
+9. erdes/data/erdes_datamodule.py
+   • 参数 defer_resize，传给 VideoDataset；defer_resize 时 DataLoader 使用 pad_video_batch_collate。
+
+10. erdes/models/decoupled_model_module.py
+   • gpu_preprocess、video_size；on_after_batch_transfer 调用 GPU 预处理。
+
+11. configs/model/resnet3d_decoupled.yaml
+    • gpu_preprocess: true，video_size: [96,128,128]。
+
+12. configs/experiment/non_rd_vs_rd/resnet3d_decoupled.yaml
+    • 默认 data: erdes_gpu；trainer.enable_progress_bar；training_progress 回调。
+
+13. erdes/callbacks/__init__.py
+    • 导出 TrainingProgressCallback。
+
+
+四、进程与日志（第三次操作记录）
+--------------------------------------------------------------------------------
+  • 已终止较早的重复进程 PID 4664（约 15:06 启动）。
+  • 已终止 PID 30056 并以新配置单进程重启（避免无法热更新回调/进度条）。
+  • 实时日志：D:\ERDES\logs\decoupled_train_live.log
+  • 启动命令（等价）：
+      $env:PYTHONUNBUFFERED="1"
+      python -u erdes/train.py experiment=non_rd_vs_rd/resnet3d_decoupled ...
+    或直接：
+      powershell -File scripts/start_decoupled_train.ps1
+
+
+五、数据流（第三次）
+--------------------------------------------------------------------------------
+  mp4 --[CPU PyAV 解码+采样]--> [B,1,D,H,W] 原始分辨率 float
+        --[pin_memory + 传到 GPU]-->
+        --[GPU pad + trilinear + /255]-->
+        --[ResNet3D + Mixup/LA]--> loss
+
+  与第二次 fast 路径对比：
+    • 本次：仍在线读 mp4，但 resize 在 GPU，减轻 CPU 算力占用。
+    • fast：离线 .pt 缓存，训练几乎只做 torch.load + GPU 前向（最快）。
+
+
+六、推荐命令
+--------------------------------------------------------------------------------
+  # 1) 单进程训练（第三次默认）
+  powershell -ExecutionPolicy Bypass -File scripts\start_decoupled_train.ps1
+
+  # 2) 若要 ~10 min/epoch，先建 D 盘缓存再 fast 实验（second_summary）
+  python scripts/build_video_cache.py --split all
+  python -u erdes/train.py experiment=non_rd_vs_rd/resnet3d_decoupled_fast ...
+
+  # 3) 查看进度
+  Get-Content D:\ERDES\logs\decoupled_train_live.log -Tail 30 -Wait
+
+
+七、验收要点
+--------------------------------------------------------------------------------
+  • 任务管理器中仅一个 erdes/train.py 占用 GPU。
+  • 日志中每 ~25 step 出现 [step N] epoch ... batch ... 行。
+  • Lightning 进度条显示 Epoch x/y 与 it/s。
+  • nvidia-smi 显存占用稳定、GPU-Util 在训练 step 期间升高。
+
+================================================================================

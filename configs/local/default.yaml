@@ -1,0 +1,8 @@
+# @package _global_
+# Machine-local paths: heavy data and training outputs live on D:.
+# Junctions at <project>/data and <project>/logs point to these folders.
+
+paths:
+  data_dir: D:/ERDES/data/
+  log_dir: D:/ERDES/logs/
+  cache_dir: D:/ERDES/cache/

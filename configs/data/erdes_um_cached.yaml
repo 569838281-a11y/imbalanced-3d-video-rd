@@ -1,0 +1,18 @@
+# UM precomputed on D: (scripts/build_um_cache.py); train/val read um cache, test reads base cache.
+_target_: erdes.data.erdes_datamodule.ERDESDataModule
+data_root: "data/erdes"
+train_csv: "data/splits/non_rd_vs_rd/train.csv"
+val_csv: "data/splits/non_rd_vs_rd/val.csv"
+test_csv: "data/splits/non_rd_vs_rd/test.csv"
+size: [96, 128, 128]
+batch_size: 4
+num_workers: 0
+pin_memory: true
+persistent_workers: false
+use_cache: true
+cache_dir: "D:/ERDES/cache/non_rd_vs_rd"
+um_cache_dir: "D:/ERDES/cache/non_rd_vs_rd_um"
+cache_mmap: true
+defer_resize: false
+use_um: true
+um_strength: 1.5

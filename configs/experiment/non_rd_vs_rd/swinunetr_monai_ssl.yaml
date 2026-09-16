@@ -1,0 +1,60 @@
+# @package _global_
+# Experiment: MONAI official SSL Swin-UNETR fine-tuning, 15 epochs, no UM.
+
+defaults:
+  - override /data: erdes
+  - override /model: swinunetr_monai_ssl
+  - override /callbacks: default
+  - override /trainer: default
+  - override /logger: tensorboard
+
+tags: ["erdes", "swinunetr", "monai_ssl", "15ep", "non_rd_vs_rd"]
+
+seed: 42
+
+trainer:
+  min_epochs: 15
+  max_epochs: 15
+  gradient_clip_val: 0.0
+  log_every_n_steps: 10
+
+model:
+  optimizer:
+    lr: 1.0e-4
+  compile: false
+
+data:
+  use_um: false
+  use_cache: false
+  batch_size: 2
+  num_workers: 0
+  train_csv: "data/splits/non_rd_vs_rd/train.csv"
+  val_csv: "data/splits/non_rd_vs_rd/val.csv"
+  test_csv: "data/splits/non_rd_vs_rd/test.csv"
+
+logger:
+  tensorboard:
+    prefix: "swinunetr_monai_ssl"
+
+callbacks:
+  model_checkpoint:
+    dirpath: ${paths.output_dir}/checkpoints/swinunetr_monai_ssl
+    filename: "swinunetr_monai_ssl_epoch_{epoch:03d}"
+    monitor: "val/acc"
+    mode: "max"
+    save_top_k: -1
+    every_n_epochs: 1
+    save_last: true
+    auto_insert_metric_name: false
+    verbose: true
+
+  rich_progress_bar: null
+
+  training_progress:
+    _target_: erdes.callbacks.training_progress_callback.TrainingProgressCallback
+    log_every_n_steps: 10
+    progress_log_file: "D:/ERDES/logs/swinunetr_monai_ssl_progress.log"
+
+hydra:
+  run:
+    dir: logs/train/runs/rd/swinunetr_monai_ssl/${now:%Y-%m-%d_%H-%M-%S}

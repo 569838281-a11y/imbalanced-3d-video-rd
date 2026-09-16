@@ -1,0 +1,672 @@
+================================================================================
+  ERDES 眼科超声视频分类项目 — 中文项目说明书
+  基于 PyTorch Lightning + Hydra 的多阶段级联训练与推理框架
+  生成说明：本文档扫描工作区时完全忽略 logs/ 目录内容
+================================================================================
+
+
+================================================================================
+【一、项目完整生命周期运行指南】
+================================================================================
+
+---- 1. 准备阶段 ----
+
+(1) 硬件与存储
+    - 推荐 NVIDIA GPU（项目默认 trainer 使用 GPU + 16-bit 混合精度）
+    - 大数据与训练产物可放在 D 盘：当前通过目录联接，C 盘项目下的 data/、logs/
+      实际指向 D:\ERDES\data 与 D:\ERDES\logs（见 configs/local/default.yaml）
+
+(2) 创建并激活 Conda 环境（任选其一）
+
+    方式 A — 使用 environment.yaml：
+      conda env create -f environment.yaml
+      conda activate erdes
+
+    方式 B — 使用 requirements.txt（本机已用 D:\anaconda3\envs\erdes）：
+      conda create -n erdes python=3.10 -y
+      conda activate erdes
+      pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+      pip install -r requirements.txt
+      pip install -e .
+
+(3) 进入项目根目录（含 .project-root 标记文件的目录）
+      cd C:\Users\ADMIN\Desktop\test_5
+
+(4) 准备数据集
+    - 将 ERDES 超声视频按官方目录结构放入 data/erdes/（实际可能在 D:\ERDES\data\erdes）
+    - 若尚无 CSV 划分，运行数据划分脚本（见 erdes/data/create_data_splits.py）
+
+(5) 可选环境变量（减少 Windows 下 OpenMP 冲突）
+      set KMP_DUPLICATE_LIB_OK=TRUE
+      set PYTHONIOENCODING=utf-8
+
+
+---- 2. 运行阶段 ----
+
+【2.1 单任务二分类训练（第一阶段：训练某个模型完成某个二分类任务）】
+
+  通用格式（在项目根目录执行）：
+    python erdes/train.py experiment=<任务文件夹>/<模型名> tags=[erdes,<模型名>]
+
+  示例 1 — Non-RD vs RD + 3D ResNet（论文该任务最强基线之一）：
+    python erdes/train.py experiment=non_rd_vs_rd/resnet3d tags=[erdes,resnet3d]
+
+  示例 2 — 黄斑脱离 vs 完整 + 3D U-Net：
+    python erdes/train.py experiment=macula_detached_vs_intact/unet3d tags=[erdes,unet3d]
+
+  示例 3 — 从 checkpoint 续训：
+    python erdes/train.py experiment=non_rd_vs_rd/resnet3d ^
+      ckpt_path=logs/train/runs/rd/resnet3d/<时间戳>/checkpoints/resnet3d/resnet3d_best_epoch_015.ckpt ^
+      tags=[erdes,resnet3d]
+
+  常用 Hydra 命令行覆盖：
+    python erdes/train.py experiment=non_rd_vs_rd/resnet3d data.batch_size=4 trainer.max_epochs=50 logger=tensorboard
+
+  可用 experiment 任务目录（configs/experiment/ 下）：
+    - non_rd_vs_rd          非视网膜脱离 vs 视网膜脱离（级联第一阶段常用）
+    - macula_detached_vs_intact  黄斑脱离 vs 黄斑完整（级联第二阶段常用）
+    - normal_vs_rd / pvd_vs_rd / normal_vs_pvd
+    - normal_vs_pvd_topk_30_ceil / _50_ceil / _70_ceil（带时间 top-k 池化变体）
+
+  每个任务目录内可选模型名：
+    resnet3d, unet3d, unetplusplus, vnet, senet, swinunetr, unetr, vit
+
+【2.2 模型评估（在测试集上跑已训练权重）】
+
+    python erdes/eval.py experiment=non_rd_vs_rd/resnet3d ^
+      ckpt_path=<你的.ckpt路径>
+
+【2.3 二阶段 / 多阶段级联推理（训练完成后的临床流程模拟）】
+
+  两阶段：RD 判断 → 若阳性再判黄斑状态
+    python pipe/diagnostic_pipeline.py --input <单个视频.mp4>
+    python pipe/diagnostic_pipeline.py --input <视频列表.csv> --output results.csv
+
+  指定权重目录与架构（默认 weights/non_rd_vs_rd.ckpt 与 weights/macula_detached_vs_intact.ckpt）：
+    python pipe/diagnostic_pipeline.py --input video.mp4 ^
+      --weights-dir weights ^
+      --rd-model unet3d --macula-model unet3d ^
+      --rd-ckpt <rd.ckpt路径> --macula-ckpt <macula.ckpt路径>
+
+  三阶段实验管线（RD → 黄斑 或 Normal/PVD）：
+    python pipe/diagnostic_pipeline_macula_pvd_normal.py --input video.mp4
+
+【2.4 训练后可视化（损失曲线、混淆矩阵）】
+
+    python scripts/plot_training_results.py
+    python scripts/plot_training_results.py --skip-confusion
+
+  输出默认目录：<某次运行>/plots/ 下的 PNG 文件
+
+
+---- 3. 结束与终止 ----
+
+【3.1 安全中断正在前台运行的训练】
+  - 在运行 train.py 的终端窗口按：Ctrl + C
+  - Lightning 会尝试正常结束当前 epoch；已配置的 ModelCheckpoint 会保留已保存的 .ckpt
+
+【3.2 查找占用 GPU 的 Python 进程（Windows PowerShell）】
+    nvidia-smi
+  记下 PID 后结束进程：
+    taskkill /PID <进程号> /F
+
+【3.3 按进程名结束（慎用，会结束所有匹配进程）】
+    taskkill /IM python.exe /F
+
+【3.4 仅结束特定 conda 环境中的训练】
+  在任务管理器中结束对应 python.exe，或使用：
+    Get-Process python | Where-Object {$_.Path -like "*erdes*"} | Stop-Process -Force
+
+
+================================================================================
+【二、项目架构总览】
+================================================================================
+
+本项目是 OSUPCVLab 开源的 ERDES（Eye Retinal DEtachment UltraSound）基准代码库，
+采用 Lightning-Hydra 模板组织，核心分为三层：
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │  配置层 configs/          Hydra YAML：数据、模型、训练器、实验组合   │
+  └───────────────────────────────┬─────────────────────────────┘
+                                  │ hydra.utils.instantiate
+  ┌───────────────────────────────▼─────────────────────────────┐
+  │  训练层 erdes/             train.py / eval.py + ModelModule │
+  │                            ERDESDataModule + 3D 视频网络      │
+  └───────────────────────────────┬─────────────────────────────┘
+                                  │ 加载 .ckpt
+  ┌───────────────────────────────▼─────────────────────────────┐
+  │  推理层 pipe/              多模型级联诊断流水线                 │
+  └─────────────────────────────────────────────────────────────┘
+
+数据流（训练时）：
+  CSV(path,label) → VideoDataset 读 mp4 → [C,D,H,W] 张量
+  → build_3d_architecture(model_name) → ModelModule(BCEWithLogits)
+  → Lightning Trainer 训练 / 验证 / 测试
+
+级联推理流（部署时）：
+  视频 → RD 模型 → 若 RD+ → 黄斑模型 → 诊断标签
+                  → 若 RD- → （三阶段管线中）PVD/Normal 模型
+
+
+================================================================================
+【三、目录结构说明（不含 logs/）】
+================================================================================
+
+test_5/
+├── configs/                 Hydra 全部配置
+│   ├── train.yaml           训练主配置入口
+│   ├── eval.yaml            评估主配置入口
+│   ├── data/                数据集 DataModule 配置
+│   ├── model/               各 3D 架构 + ModelModule 超参
+│   ├── experiment/          按「任务/模型」组合的实验配方
+│   ├── trainer/             CPU/GPU/DDP 等训练器
+│   ├── callbacks/            checkpoint、早停、进度条
+│   ├── logger/              TensorBoard / W&B 等
+│   ├── paths/               根目录、数据、日志路径
+│   ├── hydra/               Hydra 运行目录规则
+│   ├── debug/               快速调试配置
+│   ├── extras/              打印配置树、强制 tags
+│   ├── hparams_search/      Optuna 超参搜索
+│   └── local/               本机路径（如 D 盘），不提交 git
+├── data/                    数据集（可能联接至 D:\ERDES\data）
+│   ├── erdes/               原始超声视频 mp4
+│   └── splits/<task>/       train.csv, val.csv, test.csv
+├── erdes/                   Python 源码包
+│   ├── train.py             训练入口
+│   ├── eval.py              评估入口
+│   ├── data/                DataModule、Dataset、划分脚本
+│   ├── models/              LightningModule、网络工厂、编码器
+│   └── utils/               Hydra 辅助、日志、实例化
+├── pipe/                    级联推理流水线
+├── scripts/                 辅助脚本（绘图等）
+├── tests/                   pytest 单元测试
+├── requirements.txt         pip 依赖
+├── environment.yaml         conda 环境
+├── setup.py                 可编辑安装 erdes 包
+└── README.md                官方英文说明
+
+
+================================================================================
+【四、核心 Python 文件说明】
+================================================================================
+
+------------------------------------------------------------------------------
+【文件路径与名称】：erdes/train.py
+【核心功能】：
+  整个项目的主训练入口。读取 Hydra 合并后的配置，实例化 DataModule、
+  ModelModule、Callbacks、Logger、Trainer，执行 fit（及可选的 test）。
+【使用与调用方法】：
+  在项目根目录执行（非直接 import）：
+    python erdes/train.py experiment=<任务>/<模型> [Hydra覆盖项...]
+  内部通过 @hydra.main(config_path="../configs", config_name="train.yaml") 加载配置；
+  rootutils 自动将项目根加入 PYTHONPATH 并设置 PROJECT_ROOT。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：erdes/eval.py
+【核心功能】：
+  加载指定 checkpoint，在测试集上运行 trainer.test()，输出分类指标。
+【使用与调用方法】：
+    python erdes/eval.py experiment=non_rd_vs_rd/resnet3d ckpt_path=<路径.ckpt>
+  必须提供 ckpt_path（configs/eval.yaml 中默认为 ??? 占位）。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：erdes/models/model_module.py
+【核心功能】：
+  PyTorch Lightning 模块：封装前向传播、BCEWithLogitsLoss、训练/验证/测试步、
+  指标（Accuracy、Precision、Recall/Sensitivity、Specificity、F1）及学习率调度。
+【使用与调用方法】：
+  不单独运行；由 configs/model/*.yaml 中 _target_: erdes.models.model_module.ModelModule
+  指定，经 hydra.utils.instantiate(cfg.model) 在 train.py 中创建。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：erdes/models/components/factory.py
+【核心功能】：
+  3D 网络工厂：根据 model_name 字符串（resnet3d、unet3d、vit 等）构建对应分类器，
+  支持 avg / topk 时间池化。
+【使用与调用方法】：
+  由 model YAML 中 net._target_: erdes.models.components.factory.build_3d_architecture
+  及 net.model_name 调用；也可在 pipe 推理脚本中直接 import build_3d_architecture。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：erdes/models/components/cls_model.py
+【核心功能】：
+  定义各架构的分类头封装类：ResNet3DClassifier、Unet3DClassifier、SENet3DClassifier、
+  SwinUnetrClassifier、UNetPlusPlusClassifier、VNetClassifier、ViTClassifier 等。
+【使用与调用方法】：
+  由 factory.py 中各 Builder 的 build() 方法导入并实例化，不直接运行。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：erdes/models/components/encoders/unet3d.py
+【核心功能】：
+  3D U-Net 编码器/解码器结构实现（MONAI 等组件），供 Unet3DClassifier 使用。
+【使用与调用方法】：
+  被 cls_model.py 引用，训练时通过 model=unet3d 配置间接使用。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：erdes/models/components/encoders/resnet3d.py
+（注：ResNet3D 主体在 cls_model.py；encoders 目录主要为各网络骨干）
+【核心功能】：
+  见 factory 与 cls_model；encoders 下各文件实现具体骨干网络块。
+【使用与调用方法】：
+  随 model 配置自动加载。
+
+  encoders/ 目录其余文件同理：
+    - unetplusplus.py   UNet++ 结构
+    - vnet.py           V-Net 结构
+    - swinunetr.py      Swin-UNETR 结构
+    - unetr.py          UNETR 结构
+    - vit.py            Vision Transformer 3D
+    - building_blocks.py  公共卷积/归一化等构建块
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：erdes/data/erdes_datamodule.py
+【核心功能】：
+  Lightning DataModule：根据 CSV 路径创建 train/val/test 的 VideoDataset 与 DataLoader。
+【使用与调用方法】：
+  configs/data/erdes.yaml 中 _target_ 指向本类；train.py 中 hydra.utils.instantiate(cfg.data)。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：erdes/data/components/erdes_dataset.py
+【核心功能】：
+  PyTorch Dataset：按 CSV 读取 mp4 路径与标签，用 PyAV 解码视频帧，转灰度、
+  resize 到 [96,128,128]，归一化到 [0,1]，返回 (video_tensor, label)。
+【使用与调用方法】：
+  由 ERDESDataModule.setup() 内部实例化；也可在 scripts/plot_training_results.py
+  中单独用于推理收集预测。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：erdes/data/components/utils.py
+【核心功能】：
+  视频空间变换：PadToSquare3D（补成正方形）、Interpolate3D（三线性插值到目标尺寸）、
+  resize() 组合变换。
+【使用与调用方法】：
+  erdes_dataset.py 与 pipe 推理脚本中 from erdes.data.components.utils import resize。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：erdes/data/create_data_splits.py
+【核心功能】：
+  从 data/erdes 原始目录结构扫描 mp4，按 TASKS 字典定义的二分类任务做分层划分
+  （约 72% train / 8% val / 20% test），写出 data/splits/<task>/*.csv。
+【使用与调用方法】：
+    python erdes/data/create_data_splits.py --root data/erdes
+    python erdes/data/create_data_splits.py --root data/erdes --tasks non_rd_vs_rd macula_detached_vs_intact
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：erdes/utils/utils.py
+【核心功能】：
+  extras()：训练前打印配置树、强制 tags；task_wrapper：捕获异常并记录输出目录；
+  get_metric_value()：供超参搜索读取优化指标。
+【使用与调用方法】：
+  train.py / eval.py 的装饰器与 main 中调用 extras(cfg)。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：erdes/utils/instantiators.py
+【核心功能】：
+  根据配置字典批量实例化 Lightning Callbacks 和 Loggers 列表。
+【使用与调用方法】：
+  train.py 中 instantiate_callbacks(cfg.callbacks)、instantiate_loggers(cfg.logger)。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：erdes/utils/logging_utils.py
+【核心功能】：
+  将超参数记录到已配置的 Logger（如 TensorBoard）。
+【使用与调用方法】：
+  train.py 中可调用 log_hyperparameters(object_dict)（当前代码中部分被注释）。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：erdes/utils/pylogger.py
+【核心功能】：
+  提供 RankedLogger，在 DDP 时仅 rank 0 打印，避免多卡重复日志。
+【使用与调用方法】：
+  各模块 from erdes.utils import RankedLogger 后 log.info(...)。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：erdes/utils/rich_utils.py
+【核心功能】：
+  用 Rich 库美化打印 Hydra 配置树；交互式补全 experiment tags。
+【使用与调用方法】：
+  utils.extras() 在 print_config / enforce_tags 为真时调用。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：erdes/utils/__init__.py
+【核心功能】：
+  导出 utils 子模块的公共 API，供 train/eval 统一 import。
+【使用与调用方法】：
+  from erdes.utils import extras, task_wrapper, ...
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：pipe/diagnostic_pipeline.py
+【核心功能】：
+  二阶段临床推理流水线：① RD 分类器判断是否有视网膜脱离；
+  ② 若阳性，黄斑分类器判断 Macula Detached / Intact。支持单视频与 CSV 批量。
+【使用与调用方法】：
+    python pipe/diagnostic_pipeline.py --input path/to/video.mp4
+    python pipe/diagnostic_pipeline.py --input list.csv --output out.csv --video-column path
+  默认权重目录为项目下 weights/（需自行放置训练好的 .ckpt）。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：pipe/diagnostic_pipeline_macula_pvd_normal.py
+【核心功能】：
+  三阶段实验性流水线：RD →（阳性）黄斑；（阴性）Normal vs PVD 第三模型。
+【使用与调用方法】：
+    python pipe/diagnostic_pipeline_macula_pvd_normal.py --input video.mp4
+  参数与 diagnostic_pipeline.py 类似，需准备三份 checkpoint。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：pipe/utils/list_mp4.py
+【核心功能】：
+  辅助工具：列举目录下 mp4 文件，便于构建数据清单。
+【使用与调用方法】：
+    python pipe/utils/list_mp4.py （查看文件内 argparse 说明）
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：scripts/plot_training_results.py
+【核心功能】：
+  从训练终端日志解析 Epoch 级 Loss/Acc，绘制曲线；加载最佳 ckpt 在验证集上
+  推理并绘制混淆矩阵热力图。
+【使用与调用方法】：
+    python scripts/plot_training_results.py
+    python scripts/plot_training_results.py --ckpt-path <path> --skip-confusion
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：setup.py
+【核心功能】：
+  将 erdes 注册为可安装 Python 包，定义依赖与 console_scripts（train_command、eval_command）。
+【使用与调用方法】：
+    pip install -e .
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：tests/conftest.py
+【核心功能】：
+  pytest 全局 fixture 与测试配置。
+【使用与调用方法】：
+    pytest tests/
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：tests/test_train.py / test_eval.py / test_datamodules.py /
+                  test_configs.py / test_sweeps.py
+【核心功能】：
+  分别测试训练流程、评估、DataModule、Hydra 配置可组合性、超参搜索等。
+【使用与调用方法】：
+    pytest tests/test_train.py
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：tests/helpers/run_if.py、package_available.py、run_sh_command.py
+【核心功能】：
+  测试辅助：按环境跳过测试、检测可选包、运行 shell 命令。
+【使用与调用方法】：
+  供 tests/ 下用例内部使用，不直接运行。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/__init__.py
+【核心功能】：
+  标记 configs 为 Python 包（部分工具链需要），通常为空或极简。
+【使用与调用方法】：
+  无独立运行方式。
+
+
+================================================================================
+【五、核心 YAML 配置文件说明】
+================================================================================
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/train.yaml
+【核心功能】：
+  训练总入口配置：通过 defaults 列表组合 data、model、trainer、callbacks、
+  experiment、local、debug 等子配置；定义 train/test 开关、seed、tags。
+【使用与调用方法】：
+  由 erdes/train.py 的 @hydra.main(config_name="train.yaml") 自动加载；
+  命令行 experiment=... 覆盖 experiment 组。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/eval.yaml
+【核心功能】：
+  评估总入口：类似 train.yaml，但 task_name 为 eval，且要求 ckpt_path。
+【使用与调用方法】：
+  erdes/eval.py 加载；必须传入 ckpt_path=...
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/data/erdes.yaml
+【核心功能】：
+  指定 ERDESDataModule 及默认数据路径、CSV、视频尺寸 [96,128,128]、batch_size、num_workers。
+【使用与调用方法】：
+  train.yaml defaults 中 data: erdes；各 experiment 可 override batch_size 与 CSV 路径。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/paths/default.yaml
+【核心功能】：
+  定义 root_dir（PROJECT_ROOT）、data_dir、log_dir、output_dir（Hydra 动态输出目录）。
+【使用与调用方法】：
+  被 callbacks、logger 等通过 ${paths.xxx} 引用；local/default.yaml 可改到 D 盘。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/local/default.yaml
+【核心功能】：
+  本机专用：将 data_dir、log_dir 指向 D:/ERDES/（与 C 盘目录联接配合使用）。
+【使用与调用方法】：
+  train.yaml 中 optional local: default 自动合并；换机器可复制修改此文件。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/trainer/default.yaml
+【核心功能】：
+  Lightning Trainer：GPU、单卡、max_epochs=50、16-mixed 精度、每 epoch 验证。
+【使用与调用方法】：
+  命令行可换：trainer=cpu、trainer=ddp trainer.devices=4 等（见 configs/trainer/）。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/trainer/cpu.yaml / gpu.yaml / ddp.yaml / ddp_sim.yaml / mps.yaml
+【核心功能】：
+  不同硬件/分布式训练预设。
+【使用与调用方法】：
+    python erdes/train.py trainer=cpu experiment=...
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/model/resnet3d.yaml
+【核心功能】：
+  组合 ModelModule + Adam 优化器 + ReduceLROnPlateau + build_3d_architecture(resnet3d)，
+  含 topk 时间池化等超参。
+【使用与调用方法】：
+    python erdes/train.py model=resnet3d
+  或在 experiment 中 override /model: resnet3d。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/model/unet3d.yaml、unetplusplus.yaml、vnet.yaml、
+                  senet.yaml、swinunetr.yaml、unetr.yaml、vit.yaml
+【核心功能】：
+  与 resnet3d.yaml 结构相同，仅 net.model_name 不同，对应 factory 中各 Builder。
+【使用与调用方法】：
+    python erdes/train.py model=unet3d experiment=macula_detached_vs_intact/unet3d
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/callbacks/default.yaml
+【核心功能】：
+  默认启用：ModelCheckpoint（监控 val/acc）、EarlyStopping（patience=100）、
+  RichModelSummary、RichProgressBar。
+【使用与调用方法】：
+  train.yaml 中 callbacks: default；可 callbacks.rich_progress_bar=null 关闭进度条。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/callbacks/model_checkpoint.yaml
+【核心功能】：
+  单独定义检查点保存规则（目录、文件名模板、monitor、save_top_k）。
+【使用与调用方法】：
+  被 callbacks/default.yaml 通过 defaults 引入；experiment 可覆盖 dirpath/monitor。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/callbacks/early_stopping.yaml
+【核心功能】：
+  验证指标长期不提升时提前停止训练。
+【使用与调用方法】：
+  随 callbacks/default.yaml 加载；experiment 可覆盖 patience、monitor。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/callbacks/model_summary.yaml、rich_progress_bar.yaml
+【核心功能】：
+  训练开始前打印模型结构；训练中 Rich 进度条。
+【使用与调用方法】：
+  随 default callbacks 加载；Windows 终端偶发编码问题时可 null 掉 rich_progress_bar。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/logger/tensorboard.yaml
+【核心功能】：
+  启用 TensorBoardLogger，日志写入当前 Hydra 运行目录下。
+【使用与调用方法】：
+    python erdes/train.py logger=tensorboard experiment=...
+  查看：tensorboard --logdir logs/train/runs
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/logger/wandb.yaml、csv.yaml、mlflow.yaml、comet.yaml、
+                  neptune.yaml、aim.yaml、many_loggers.yaml
+【核心功能】：
+  对接各类实验跟踪后端；many_loggers 可同时启用多种。
+【使用与调用方法】：
+    python erdes/train.py logger=wandb
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/hydra/default.yaml
+【核心功能】：
+  Hydra 运行/多跑输出目录规则、彩色日志、单 run 日志文件路径。
+【使用与调用方法】：
+  自动加载；experiment 内 hydra.run.dir 可覆盖单次实验输出子路径。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/extras/default.yaml
+【核心功能】：
+  ignore_warnings、enforce_tags、print_config 开关。
+【使用与调用方法】：
+  train/eval 启动时 extras(cfg) 读取。
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/debug/default.yaml、fdr.yaml、limit.yaml、overfit.yaml、profiler.yaml
+【核心功能】：
+  快速调试：1 epoch、CPU、关闭 logger/callback、小数据子集、过拟合单 batch、性能分析等。
+【使用与调用方法】：
+    python erdes/train.py debug=default experiment=non_rd_vs_rd/resnet3d
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/hparams_search/erdes_optuna.yaml
+【核心功能】：
+  使用 Optuna Sweeper 对超参（如 lr、batch_size）做自动搜索。
+【使用与调用方法】：
+    python erdes/train.py -m hparams_search=erdes_optuna experiment=non_rd_vs_rd/resnet3d
+
+
+------------------------------------------------------------------------------
+【文件路径与名称】：configs/experiment/<任务名>/<模型名>.yaml
+【核心功能】：
+  「实验配方」：为特定二分类任务 + 特定架构锁定 overrides（数据 CSV、batch、
+  学习率、logger 前缀、checkpoint 路径、hydra 输出子目录等）。
+【使用与调用方法】：
+  统一调用格式：
+    python erdes/train.py experiment=<任务名>/<模型名>
+
+  任务名与医学含义对照：
+    non_rd_vs_rd              — 阶段1：是否视网膜脱离（Normal+PVD vs RD）
+    macula_detached_vs_intact — 阶段2：黄斑是否脱离（仅 RD 样本子集语义）
+    normal_vs_rd              — 正常 vs RD
+    pvd_vs_rd                 — 后玻璃体脱离 vs RD
+    normal_vs_pvd             — 正常 vs PVD
+    normal_vs_pvd_topk_*_ceil — 带 top-k 时间池化比例的 normal_vs_pvd 变体
+
+  每个任务目录下模型文件名即 model 组名（resnet3d.yaml、unet3d.yaml 等），
+  内部典型结构见 configs/experiment/non_rd_vs_rd/resnet3d.yaml：
+    - override data/model/trainer/logger/callbacks
+    - 指定 data.train_csv / val_csv / test_csv
+    - 设置 trainer.max_epochs、model.optimizer.lr
+    - hydra.run.dir 定制日志子路径
+
+
+================================================================================
+【六、其他重要文件】
+================================================================================
+
+【文件路径与名称】：requirements.txt
+【核心功能】：pip 依赖清单（torch、lightning、hydra、monai、pytorchvideo 等）。
+【使用与调用方法】：pip install -r requirements.txt
+
+【文件路径与名称】：environment.yaml
+【核心功能】：conda 环境定义（Python 3.10 + pytorch + lightning + hydra）。
+【使用与调用方法】：conda env create -f environment.yaml
+
+【文件路径与名称】：README.md
+【核心功能】：官方英文文档：数据集下载、模型卡片、训练命令大全。
+【使用与调用方法】：阅读参考；中文流程以本文档第一节为准。
+
+【文件路径与名称】：.project-root
+【核心功能】：空标记文件，供 rootutils 定位项目根目录。
+【使用与调用方法】：train.py 中 rootutils.setup_root 自动识别，勿删。
+
+【文件路径与名称】：.env.example
+【核心功能】：环境变量示例（可选私有路径），复制为 .env 后由 rootutils 加载。
+【使用与调用方法】：设置 MY_DATA_PATH 等后在 yaml 中用 ${oc.env:MY_VAR} 引用。
+
+【文件路径与名称】：data/splits/<task>/train.csv、val.csv、test.csv
+【核心功能】：
+  二分类样本清单，列 path（相对 data/erdes 的视频路径）、label（0/1）。
+【使用与调用方法】：
+  由 create_data_splits.py 生成；DataModule 通过 configs 中路径读取。
+
+【文件路径与名称】：weights/（若存在）
+【核心功能】：
+  存放级联推理用预训练 .ckpt（如 non_rd_vs_rd.ckpt、macula_detached_vs_intact.ckpt）。
+【使用与调用方法】：
+  pipe/diagnostic_pipeline.py 默认从此目录加载；需用户训练后复制或从 HuggingFace 下载。
+
+
+================================================================================
+【七、推荐学习与实验顺序】
+================================================================================
+
+  1. 准备 data/erdes 与 splits CSV
+  2. 训练 non_rd_vs_rd/resnet3d（级联第一阶段）
+  3. 训练 macula_detached_vs_intact/unet3d（级联第二阶段）
+  4. 将两个 best.ckpt 放入 weights/ 或指定路径
+  5. 运行 pipe/diagnostic_pipeline.py 对单条视频做端到端诊断
+  6. 使用 scripts/plot_training_results.py 写实验报告图表
+
+================================================================================
+  文档结束
+================================================================================

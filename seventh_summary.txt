@@ -1,0 +1,132 @@
+================================================================================
+  第七次更改说明 — 实验二：反锐化掩模（Unsharp Masking, UM）+ 基础 ResNet3D 15 轮
+  模型架构不变；仅数据加载/预处理端增强
+================================================================================
+
+一、实验目标
+--------------------------------------------------------------------------------
+  • 保持现有基础模型 ResNet3D（topk pooling）结构与训练逻辑不变。
+  • 在 Train / Val 数据送入模型前，对 3D 视频张量施加 Unsharp Masking，暴露边缘细节。
+  • 总训练轮数：15 epoch（与基础 15 轮实验对齐，便于对比）。
+  • 全局开关：data.use_um（True 开启 / False 关闭，便于消融）。
+
+
+二、UM 数学与实现
+--------------------------------------------------------------------------------
+  公式（逐帧、逐通道）：
+    Blurred  = GaussianBlur(Original)
+    Sharpened = (1 + strength) * Original - strength * Blurred
+
+  默认 strength = 1.5；高斯模糊 ksize=(5,5), sigma=1.0（OpenCV cv2.GaussianBlur）。
+
+  张量形状：[C, D, H, W]（灰度视频 C=1）；对 D 轴每一帧在 H×W 上独立处理。
+
+  数值范围：若输入 max>1.5 则按 [0,255] clip，否则按 [0,1] clip（与 resize 后 /255 流程一致）。
+
+
+三、本次修改/新增文件清单
+--------------------------------------------------------------------------------
+
+【新增】
+
+1. erdes/data/components/unsharp_masking.py
+   • apply_unsharp_masking(video, strength=1.5, ...)：3D 视频 UM 核心函数。
+
+2. configs/data/erdes_um.yaml
+   • 数据模块配置：use_um: true, um_strength: 1.5（可被实验覆盖）。
+
+3. configs/experiment/non_rd_vs_rd/resnet3d_um.yaml
+   • 实验入口：继承 resnet3d 模型 + erdes_um 数据；trainer.max_epochs=15。
+
+4. scripts/start_resnet3d_um_train.ps1
+   • 一键启动 15 轮 UM 实验；日志 D:\ERDES\logs\resnet3d_um_train.log。
+
+5. seventh_summary.txt（本文件）
+
+
+【修改】
+
+6. erdes/data/components/erdes_dataset.py
+   • VideoDataset 新增参数：use_um=False, um_strength=1.5。
+   • 在 resize + /255 之后、返回前调用 apply_unsharp_masking（若 use_um）。
+
+7. erdes/data/components/cached_video_dataset.py
+   • 同步支持 use_um / um_strength；读 .pt 缓存后在线施加 UM（不改动已建缓存文件）。
+   • fallback VideoDataset 传递相同 UM 参数。
+
+8. erdes/data/erdes_datamodule.py
+   • 新增 hparams：use_um, um_strength。
+   • train / val 数据集：apply_um = use_um；test 数据集：始终 apply_um=False。
+
+9. requirements.txt
+   • 增加 opencv-python-headless（UM 依赖 cv2.GaussianBlur）。
+
+
+【未修改 — 保证架构不变】
+
+  • erdes/models/components/cls_model.py（ResNet3D）
+  • erdes/models/model_module.py（ModelModule 训练逻辑）
+  • configs/model/resnet3d.yaml
+  • erdes/train.py（入口不变，换 experiment 名即可）
+
+
+四、UM 注入位置（数据流）
+--------------------------------------------------------------------------------
+
+  mp4 → PyAV 解码 → [C,D,H,W] → resize → /255 → [可选 UM] → DataLoader → ResNet3D
+
+  • Train：use_um=True 时施加 UM。
+  • Val：  use_um=True 时施加 UM（与训练一致，评估“UM 管线”下的表现）。
+  • Test： 不施加 UM（便于与原始 test 流程区分；若需可改 datamodule）。
+
+
+五、关闭 UM（对比实验）
+--------------------------------------------------------------------------------
+
+  方式 1 — 换回原实验：
+    python erdes/train.py experiment=non_rd_vs_rd/resnet3d
+
+  方式 2 — 同一实验关闭 UM：
+    python erdes/train.py experiment=non_rd_vs_rd/resnet3d_um data.use_um=false
+
+  方式 3 — 修改 configs/data/erdes_um.yaml 中 use_um: false
+
+
+六、启动 15 轮 UM 训练
+--------------------------------------------------------------------------------
+
+  cd C:\Users\ADMIN\Desktop\test_5
+
+  # 确保 OpenCV 已安装（erdes 环境）
+  pip install opencv-python-headless
+
+  # 推荐
+  powershell -ExecutionPolicy Bypass -File scripts\start_resnet3d_um_train.ps1
+
+  # 或命令行
+  python -u erdes/train.py experiment=non_rd_vs_rd/resnet3d_um data.use_um=true trainer.max_epochs=15
+
+  输出目录：
+    logs/train/runs/rd/resnet3d_um/<timestamp>/
+  Checkpoint：
+    .../checkpoints/resnet3d_um/resnet3d_um_best_epoch_*.ckpt
+
+
+七、与历次实验的关系
+--------------------------------------------------------------------------------
+  first_summary   — 两阶段解耦（DecoupledModelModule）
+  second~sixth    — 缓存加速、fast 路径、可视化等
+  seventh_summary — 本文件：基础 ResNet3D + UM，15 epoch（实验二）
+
+  对比建议：
+    基线 A：resnet3d 15ep（无 UM）— logs/.../resnet3d/2026-05-29_22-02-10
+    实验 B：resnet3d_um 15ep（有 UM）— logs/.../resnet3d_um/<新时间戳>
+
+
+八、注意事项
+--------------------------------------------------------------------------------
+  • UM 在 CPU 上逐帧计算，会显著增加数据加载时间（尤其 num_workers=0）；属预期代价。
+  • 使用 D 盘缓存时，UM 在 load 之后在线应用，无需重建 cache。
+  • 若环境无 cv2，请安装：pip install opencv-python-headless
+
+================================================================================

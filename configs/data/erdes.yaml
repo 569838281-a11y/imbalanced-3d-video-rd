@@ -1,0 +1,11 @@
+_target_: erdes.data.erdes_datamodule.ERDESDataModule
+data_root: "data/erdes"
+train_csv: "data/splits/non_rd_vs_rd/train.csv"
+val_csv: "data/splits/non_rd_vs_rd/val.csv"
+test_csv: "data/splits/non_rd_vs_rd/test.csv"
+size: [96, 128, 128]
+batch_size: 4
+num_workers: 0
+pin_memory: True
+use_um: false
+um_strength: 1.5

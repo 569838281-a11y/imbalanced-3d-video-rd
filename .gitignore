@@ -1,0 +1,128 @@
+# Python
+_pycache_/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# Distribution / packaging
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Logs and checkpoints
+logs/
+*.log
+*.ckpt
+lightning_logs/
+wandb/
+aim/
+mlruns/
+outputs/
+multirun/
+
+# Data
+data/erdes/
+data/Dataset/
+data/real_test_1k_sample/
+*.mp4
+*.avi
+*.mov
+*.h5
+*.hdf5
+*.pkl
+*.npy
+*.npz
+
+# DVC
+.dvc/
+/dvc.lock
+/dvc.yaml
+.dvcignore
+
+# OS-specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Hydra
+outputs/
+multirun/
+
+# Editor temporary/backup files
+*~
+*.swp
+*.swo
+*.bak
+
+# Local artifacts / large outputs (do not push)
+GradCAM/
+GradCAM_test/
+*.pdf
+*.pth
+*.pt
+__pycache__/
+ai_doctor_uploads/
+
+# Keep trained Lightning ckpts under weights/ (tracked via Git LFS)
+!weights/
+!weights/**
+*.ckpt
+!weights/*.ckpt
+
+# Upstream dataset marketing site (not part of this personal project)
+docs/index.html
+docs/lagunita/
+docs/media/

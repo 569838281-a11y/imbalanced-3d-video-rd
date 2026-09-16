@@ -1,0 +1,46 @@
+#_target_: erdes.models.model_module.ModelModule
+
+#optimizer:
+#  _target_: torch.optim.Adam
+#  _partial_: true
+#  lr: 0.00015
+#  weight_decay: 0.0
+
+#scheduler:
+#  _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+#  _partial_: true
+#  mode: min
+#  factor: 0.1
+#  patience: 10
+
+#net:
+#  _target_: erdes.models.components.factory.build_3d_architecture
+#  model_name: resnet3d
+#  pooling: avg  # Options: avg, topk
+#  topk_ratio: 0.5  # percentage of temporal regions to keep (0.5 = 50%)
+
+# compile model for faster training with pytorch 2.0
+#compile: false
+
+_target_: erdes.models.model_module.ModelModule
+
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 0.00015
+  weight_decay: 0.0
+
+scheduler:
+  _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+  _partial_: true
+  mode: min
+  factor: 0.1
+  patience: 10
+
+net:
+  _target_: erdes.models.components.factory.build_3d_architecture
+  model_name: resnet3d
+  pooling: topk        # 🟢 从 avg 改成 topk！让网络自动死盯着运动特征最明显的帧
+  topk_ratio: 0.5      # 保留前 50% 核心帧
+
+compile: false

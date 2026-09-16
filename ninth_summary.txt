@@ -1,0 +1,107 @@
+================================================================================
+  第九次更改说明 — 实验：MONAI 官方 SSL 预训练 Swin-UNETR + 15 轮有监督微调（无 UM）
+================================================================================
+
+一、实验目标
+--------------------------------------------------------------------------------
+  • 使用 MONAI 官方自监督（SSL）预训练权重初始化 Swin-UNETR 编码器（swinViT）。
+  • 在 non_rd_vs_rd 二分类任务上微调 15 个 epoch。
+  • 数据端不启用 Unsharp Masking（UM），保持原始灰度超声视频输入。
+  • 微调学习率 1e-4，避免破坏预训练时空特征。
+
+
+二、权重与模型
+--------------------------------------------------------------------------------
+  官方权重 URL：
+    https://github.com/Project-MONAI/MONAI-extra-test-data/releases/download/0.8.1/ssl_pretrained_weights.pth
+
+  本地缓存路径（自动下载）：
+    weights/ssl_pretrained_weights.pth
+
+  加载方式：
+    weights_dict = torch.load(...)
+    model.load_from(weights_dict)   # MONAI SwinUNETR 官方 API，注入 swinViT 主干
+
+  注意：SSL 权重对应 feature_size=48（MONAI 默认 SSL 配置），与项目内自建
+        SwinUnetrEncoder（feature_size=24）不同；本实验单独使用 MONAI 完整 SwinUNETR 类。
+
+  输入尺寸：与项目统一 [D,H,W] = [96, 128, 128]，in_channels=1（灰度）。
+  分类头：复用 ClassificationHead（avg / topk pooling），输出 num_classes=1（BCE 二分类）。
+
+
+三、本次新建 / 修改文件清单
+--------------------------------------------------------------------------------
+
+【新建】
+
+1. erdes/models/components/monai_ssl_swinunetr.py
+   • download_monai_ssl_weights() — 自动下载（monai.apps.download_url 或 torch.hub）。
+   • load_monai_ssl_weights_dict() — 加载为 load_from 所需格式。
+   • class MonaiSSLSwinUNETRClassifier
+       - from monai.networks.nets import SwinUNETR
+       - 初始化后 backbone.load_from(weights_dict)
+       - forward：仅 swinViT 瓶颈特征 + ClassificationHead（不走分割解码器）。
+   • build_monai_ssl_swinunetr_classifier() — Hydra 工厂函数。
+
+2. configs/model/swinunetr_monai_ssl.yaml
+   • ModelModule + net 指向上述工厂；optimizer.lr=1e-4。
+
+3. configs/experiment/non_rd_vs_rd/swinunetr_monai_ssl.yaml
+   • 15 epoch；data.use_um=false；batch_size=2；num_workers=0。
+
+4. scripts/start_swinunetr_monai_ssl_train.ps1
+   • 一键训练；日志 D:\ERDES\logs\swinunetr_monai_ssl_train.log。
+
+5. ninth_summary.txt（本文件）
+
+
+【修改】
+
+6. erdes/models/components/factory.py
+   • 新增架构名 swinunetr_monai_ssl → SwinUnetrMonaiSslBuilder。
+
+
+【未修改 — 保证无 UM】
+
+  • erdes/data/components/unsharp_masking.py（未调用）
+  • configs/data/erdes.yaml 默认无 UM；实验 yaml 显式 use_um: false
+  • train / val / test：test 仍不施加 UM（与 datamodule 一致）
+
+
+四、数据流
+--------------------------------------------------------------------------------
+
+  缓存/mp4 → VideoDataset（无 UM）→ [C,D,H,W] → MonaiSSLSwinUNETRClassifier → BCE 二分类
+
+
+五、启动训练
+--------------------------------------------------------------------------------
+
+  # 首次运行会自动下载 SSL 权重到 weights/ssl_pretrained_weights.pth
+  # 若网络失败，可手动下载上述 URL 放到该路径后重试。
+
+  python erdes/train.py experiment=non_rd_vs_rd/swinunetr_monai_ssl
+
+  或：
+
+  powershell -ExecutionPolicy Bypass -File scripts/start_swinunetr_monai_ssl_train.ps1
+
+
+六、与历史实验对比
+--------------------------------------------------------------------------------
+
+  | 实验              | 骨干                         | 预训练        | UM   | Epoch |
+  |-------------------|------------------------------|---------------|------|-------|
+  | 基础 ResNet3D     | 自建 ResNet3D                | 无            | 无   | 15    |
+  | UM + ResNet3D     | 自建 ResNet3D                | 无            | 有   | 15    |
+  | VideoMAE Swin     | 自建 SwinUnetrEncoder        | 项目内 MAE    | 无   | 15    |
+  | 本实验            | MONAI SwinUNETR + SSL 权重   | MONAI 官方 SSL| 无   | 15    |
+
+
+七、显存与速度建议
+--------------------------------------------------------------------------------
+  • feature_size=48 比原 swinunetr（24）更占显存；默认 batch_size=2。
+  • 若 OOM：降为 batch_size=1 或开启 model.net 下 SwinUNETR use_checkpoint（需改工厂传参）。
+  • 加速可选：D: 视频缓存 + data.use_cache=true（与 resnet3d fast 相同思路）。
+
+================================================================================

@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ERDES AI Doctor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,500;9..144,700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+  <div class="atmosphere" aria-hidden="true"></div>
+  <div class="scanline" aria-hidden="true"></div>
+
+  <main class="shell">
+    <header class="brand-block">
+      <p class="brand">ERDES</p>
+      <h1 class="headline">AI Doctor</h1>
+      <p class="lede">上传眼部超声。级联判别之后，依据引擎给出关键帧与关注区——结论、依据、报告分开呈现。</p>
+    </header>
+
+    <section class="workspace" aria-label="上传与诊断">
+      <form id="upload-form" class="dropzone" tabindex="0">
+        <input id="file-input" type="file" accept=".mp4,.avi,.mov,.mkv,.webm,.jpg,.jpeg,.png,.bmp,.tif,.tiff,.webp" multiple hidden />
+        <div class="drop-inner">
+          <p class="drop-title">拖入超声文件，或点击选择</p>
+          <p class="drop-hint">支持 mp4 / avi / mov，或若干帧图像（jpg / png）</p>
+          <p id="file-list" class="file-list" hidden></p>
+        </div>
+        <button type="submit" id="submit-btn" class="cta" disabled>开始诊断</button>
+      </form>
+
+      <div id="result-stack" class="result-stack" hidden>
+        <aside id="result-panel" class="result">
+          <p class="result-kicker">结论卡</p>
+          <h2 id="disease-label" class="disease"></h2>
+          <p id="risk-tier" class="risk"></p>
+          <p id="summary" class="summary"></p>
+          <ol id="pipeline" class="pipeline"></ol>
+          <dl class="metrics" id="metrics"></dl>
+        </aside>
+
+        <section id="evidence-panel" class="evidence-panel" aria-label="依据区">
+          <p class="result-kicker">依据区</p>
+          <p class="panel-note">Grad-CAM × 帧质量分 · 热力图≠病灶金标准</p>
+          <div id="evidence-grid" class="evidence-grid"></div>
+        </section>
+
+        <section id="report-panel" class="report-panel" aria-label="报告双栏">
+          <p class="result-kicker">报告</p>
+          <div class="report-columns">
+            <article>
+              <h3>Findings</h3>
+              <p id="findings" class="report-body"></p>
+            </article>
+            <article>
+              <h3>Impression</h3>
+              <p id="impression" class="report-body"></p>
+            </article>
+          </div>
+          <ul id="advice-list" class="advice-list"></ul>
+          <p id="disclaimer" class="disclaimer"></p>
+        </section>
+      </div>
+
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <script src="/assets/app.js"></script>
+</body>
+</html>

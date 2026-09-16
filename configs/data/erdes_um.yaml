@@ -1,0 +1,16 @@
+# ERDES data with Unsharp Masking on train/val (toggle via use_um)
+_target_: erdes.data.erdes_datamodule.ERDESDataModule
+data_root: "data/erdes"
+train_csv: "data/splits/non_rd_vs_rd/train.csv"
+val_csv: "data/splits/non_rd_vs_rd/val.csv"
+test_csv: "data/splits/non_rd_vs_rd/test.csv"
+size: [96, 128, 128]
+batch_size: 4
+num_workers: 0
+pin_memory: true
+use_cache: false
+cache_dir: ""
+defer_resize: false
+# --- UM (experiment 2); set false for ablation vs baseline ---
+use_um: true
+um_strength: 1.5

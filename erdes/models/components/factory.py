@@ -1,0 +1,156 @@
+"""
+To select the architecture based on a config file we need to ensure
+we import each of the architectures into this file. Once we have that
+we can use a keyword from the config file to build the model.
+"""
+
+import math
+from abc import ABC, abstractmethod
+
+import torch.nn as nn
+import torchvision
+
+
+# Base class for all architecture builders
+class ArchitectureBuilder(ABC):
+    def __init__(self, num_classes: int = 1, pooling: str = "avg", topk_ratio: float = 0.5):
+        self.num_classes = num_classes
+        self.pooling = pooling
+        self.topk_ratio = topk_ratio
+
+    @abstractmethod
+    def build(self):
+        pass
+
+# ResNet3D Builder
+class ResNet3DBuilder(ArchitectureBuilder):
+    def build(self):
+        from .cls_model import ResNet3DClassifier
+        return ResNet3DClassifier(
+            block="basic",
+            layers=[4, 4, 4, 4],
+            block_inplanes=[64, 128, 256, 512],
+            spatial_dims=3,
+            in_channels=1,
+            num_classes=self.num_classes,
+            pooling=self.pooling,
+            topk_ratio=self.topk_ratio,
+        )
+
+# SENet3D Builder
+class SENet3DBuilder(ArchitectureBuilder):
+    def build(self):
+        from .cls_model import SENet3DClassifier
+        return SENet3DClassifier(
+            pretrained=False,
+            spatial_dims=3,
+            in_channels=1,
+            num_classes=self.num_classes,
+            pooling=self.pooling,
+            topk_ratio=self.topk_ratio,
+        )
+
+# Unet3D Builder
+class Unet3DBuilder(ArchitectureBuilder):
+    def build(self):
+        from .cls_model import Unet3DClassifier
+        return Unet3DClassifier(
+            in_channels=1,
+            num_classes=self.num_classes,
+            pooling=self.pooling,
+            topk_ratio=self.topk_ratio,
+        )
+
+# SwinUnetr Builder
+class SwinUnetrBuilder(ArchitectureBuilder):
+    def build(self):
+        from .cls_model import SwinUnetrClassifier
+        return SwinUnetrClassifier(
+            img_size=(96, 128, 128),
+            in_channels=1,
+            num_classes=self.num_classes,
+            pooling=self.pooling,
+            topk_ratio=self.topk_ratio,
+        )
+
+
+# MONAI Swin-UNETR + official SSL pretrained encoder
+class SwinUnetrMonaiSslBuilder(ArchitectureBuilder):
+    def build(self):
+        from .monai_ssl_swinunetr import build_monai_ssl_swinunetr_classifier
+        return build_monai_ssl_swinunetr_classifier(
+            num_classes=self.num_classes,
+            pooling=self.pooling,
+            topk_ratio=self.topk_ratio,
+            load_ssl=True,
+        )
+
+# UNetPlusPlus Builder
+class UNetPlusPlusBuilder(ArchitectureBuilder):
+    def build(self):
+        from .cls_model import UNetPlusPlusClassifier
+        return UNetPlusPlusClassifier(
+            in_channels=1,
+            num_classes=self.num_classes,
+            pooling=self.pooling,
+            topk_ratio=self.topk_ratio,
+        )
+
+# VNet Builder
+class VNetBuilder(ArchitectureBuilder):
+    def build(self):
+        from .cls_model import VNetClassifier
+        return VNetClassifier(
+            in_channels=1,
+            num_classes=self.num_classes,
+            pooling=self.pooling,
+            topk_ratio=self.topk_ratio,
+        )
+
+# Unetr Builder
+class UnetrBuilder(ArchitectureBuilder):
+    def build(self):
+        from .cls_model import UnetrClassifier
+        img_size = (96, 128, 128)
+        return UnetrClassifier(
+            in_channels=1,
+            num_classes=self.num_classes,
+            img_size=img_size,
+            pooling=self.pooling,
+            topk_ratio=self.topk_ratio,
+        )
+
+# ViT Builder
+class ViTBuilder(ArchitectureBuilder):
+    def build(self):
+        from .cls_model import ViTClassifier
+        img_size = (96, 128, 128)
+        return ViTClassifier(
+            in_channels=1,
+            img_size=img_size,
+            patch_size=7,
+            num_classes=self.num_classes,
+            # Note: ViT uses its own classification head, pooling not applied
+        )
+
+# Registry of builders
+ARCHITECTURE_BUILDERS = {
+    "resnet3d": ResNet3DBuilder,
+    "senet": SENet3DBuilder,
+    "unet3d": Unet3DBuilder,
+    "swinunetr": SwinUnetrBuilder,
+    "swinunetr_monai_ssl": SwinUnetrMonaiSslBuilder,
+    "unetplusplus": UNetPlusPlusBuilder,
+    "vnet": VNetBuilder,
+    "unetr": UnetrBuilder,
+    "vit": ViTBuilder,
+}
+
+def build_3d_architecture(model_name: str, num_classes: int = 1, pooling: str = "avg", topk_ratio: float = 0.5):
+    builder_cls = ARCHITECTURE_BUILDERS.get(model_name)
+    if builder_cls is None:
+        raise ValueError(
+            f"specified model '{model_name}' not supported, edit build_architecture.py file"
+        )
+    builder = builder_cls(num_classes=num_classes, pooling=pooling, topk_ratio=topk_ratio)
+    return builder.build()

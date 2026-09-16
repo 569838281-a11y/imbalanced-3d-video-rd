@@ -1,0 +1,175 @@
+================================================================================
+  第六次更改说明 — 加速解耦训练（~2h/epoch → 目标 ~10–20 min/epoch）
+  方法不变：两阶段解耦 15 epoch + Mixup + Logit Adjustment + PR 阈值后处理
+  详见：first_summary.txt ~ fifth_summary.txt
+================================================================================
+
+一、背景与动机
+--------------------------------------------------------------------------------
+  用户反馈：优化后的 decoupled 训练每 epoch 约 2 小时，15 轮合计 ~30 小时，不可接受。
+
+  实测慢路径瓶颈（experiment=non_rd_vs_rd/resnet3d_decoupled + erdes_gpu）：
+    • 每 step 在线 PyAV 解码 mp4（~7 s/step）
+    • Windows 上 num_workers=0（避免 error 1455 共享内存死锁）
+    • batch_size=4 → 969 steps/epoch
+    • GPU 侧 defer_resize 预处理
+
+  969 × ~7 s ≈ ~2 h/epoch，与日志一致。
+
+  第二次更改（second_summary）已设计 D 盘 tensor 缓存 + resnet3d_decoupled_fast，
+  但缓存从未构建。本次第六次更改：落地并行建缓存、完善 fast 配置、一键启动脚本，
+  并停掉仍在跑的慢路径训练，改走 fast 路径。
+
+
+二、方法是否改变？
+--------------------------------------------------------------------------------
+  未改变：
+    ✓ DecoupledModelModule 两阶段（1–11 表征 + Mixup / 12–15 冻结骨干 + Logit Adjustment）
+    ✓ 15 epoch、stage1_end_epoch=11、stage2_start_epoch=11
+    ✓ BCEWithLogitsLoss、val/f1 & val/pr_auc、PRThresholdSearchCallback
+    ✓ 同一 CSV 划分与 ResNet3D(topk) 结构
+
+  仅改变【数据 I/O 与 DataLoader 工程参数】：
+    • 离线解码 mp4 → D:/ERDES/cache/non_rd_vs_rd/*.pt（float16）
+    • 训练时 torch.load 读缓存，gpu_preprocess=false（已在缓存中 resize）
+    • batch_size 4→8、num_workers 0→2、prefetch_factor=2
+    • persistent_workers=true（缓存读取轻量，Windows 上可安全使用少量 worker）
+
+
+三、本次修改/新增文件清单
+--------------------------------------------------------------------------------
+
+【重写】
+
+1. scripts/build_video_cache.py
+   • 新增多进程并行解码：ProcessPoolExecutor + --workers N（默认 4，Windows 建议 2）。
+   • 顶层函数 _build_index() 供 worker 调用；主进程 tqdm 汇总进度。
+   • 跳过已存在 .pt（增量构建）；输出 built/skipped 统计。
+   • 用法：
+       python scripts/build_video_cache.py --split train --workers 2
+       python scripts/build_video_cache.py --split val --workers 2
+       python scripts/build_video_cache.py --split all --workers 4
+
+【新增】
+
+2. scripts/start_decoupled_train_fast.ps1
+   • 快速解耦训练一键启动（依赖 D 盘缓存）。
+   • 启动前检查：train 缓存 .pt ≥ 3800；并提示 val 需已 build。
+   • 设置 TMP/TEMP→D:\ERDES\temp，日志→D:\ERDES\logs\decoupled_fast_train.log。
+   • 调用 experiment=non_rd_vs_rd/resnet3d_decoupled_fast。
+
+3. sixth_summary.txt（本文件）
+
+
+【修改】
+
+4. configs/experiment/non_rd_vs_rd/resnet3d_decoupled_fast.yaml
+   • 对齐 15 epoch 解耦方案（与 resnet3d_decoupled 一致）：
+       stage1_end_epoch=11, stage2_start_epoch=11, total_epochs=15
+   • data：erdes_cached、batch_size=8、num_workers=2、use_cache=true
+   • model.gpu_preprocess=false（缓存已含 resize，无需 GPU 再处理）
+   • 启用 TrainingProgressCallback（log_every_n_steps=25）
+   • rich_progress_bar=null（避免 Windows 控制台冲突）
+   • hydra.run.dir → logs/train/runs/rd/resnet3d_decoupled_fast/...
+
+5. configs/data/erdes_cached.yaml
+   • num_workers: 4 → 2（Windows + 8GB 显存更稳）
+   • persistent_workers: true
+   • defer_resize: false（缓存已是目标尺寸）
+
+6. erdes/data/erdes_datamodule.py
+   • _loader_kwargs()：num_workers>0 时增加 prefetch_factor=2。
+   • 与 persistent_workers 配合，减少 GPU 等 batch 空窗。
+
+7. erdes/data/components/cached_video_dataset.py
+   • __getitem__：若缓存为 float16，加载后 .float() 再返回（AMP/BCE 数值更稳）。
+
+
+四、慢路径 vs 快速路径对比
+--------------------------------------------------------------------------------
+
+  项目                    慢路径 (decoupled)          快速路径 (decoupled_fast)
+  --------------------------------------------------------------------------
+  数据配置                erdes_gpu                   erdes_cached
+  解码方式                  每 step 在线 PyAV           预建 .pt，torch.load
+  batch_size              4                           8
+  num_workers             0                           2
+  gpu_preprocess          true                        false
+  steps/epoch             ~969                        ~485
+  单 epoch 耗时           ~2 h（实测）                目标 ~10–20 min
+  15 epoch 合计           ~30 h                       目标 ~3–5 h
+
+  启动命令（慢）：
+    python -u erdes/train.py experiment=non_rd_vs_rd/resnet3d_decoupled data.num_workers=0
+
+  启动命令（快）：
+    powershell -File scripts/start_decoupled_train_fast.ps1
+    # 或
+    python -u erdes/train.py experiment=non_rd_vs_rd/resnet3d_decoupled_fast model.gpu_preprocess=false
+
+
+五、本次运行时操作
+--------------------------------------------------------------------------------
+  1. 已停止慢路径训练进程 PID 14716
+     （epoch 1 约 batch 131/969，尚无 decoupled checkpoint 保存，重开 fast 路径无损失）。
+
+  2. 后台并行构建 D 盘视频缓存：
+       train：3873 条，--workers 2 → D:\ERDES\logs\build_cache_train.log
+       val  ：431 条，--workers 2  → D:\ERDES\logs\build_cache_val.log
+
+  3. val 缓存已完成：431/431 built=431, skipped=0（约 3 分钟）。
+     train 缓存构建中（约 3–4 it/s，总时长约 20–25 分钟）。
+
+  4. 缓存根目录：D:\ERDES\cache\non_rd_vs_rd\（文件名 = md5(相对路径).pt）
+
+
+六、推荐命令（完整流程）
+--------------------------------------------------------------------------------
+  cd C:\Users\ADMIN\Desktop\test_5
+  $env:TMP="D:\ERDES\temp"; $env:TEMP="D:\ERDES\temp"
+  $env:KMP_DUPLICATE_LIB_OK="TRUE"
+
+  # 1) 构建缓存（仅需一次；val 可先跑完）
+  D:\anaconda3\envs\erdes\python.exe scripts/build_video_cache.py --split val --workers 2
+  D:\anaconda3\envs\erdes\python.exe scripts/build_video_cache.py --split train --workers 2
+
+  # 2) 确认缓存数量（train+val 合计约 4304）
+  (Get-ChildItem D:\ERDES\cache\non_rd_vs_rd\*.pt | Measure-Object).Count
+
+  # 3) 启动快速 15 epoch 解耦训练
+  powershell -ExecutionPolicy Bypass -File scripts\start_decoupled_train_fast.ps1
+
+  # 4) 监控
+  Get-Content D:\ERDES\logs\decoupled_fast_train.log -Tail 20 -Wait
+
+
+七、注意事项
+--------------------------------------------------------------------------------
+  • 勿与 Grad-CAM / 其他 train.py 同时占 GPU（fifth_summary 可视化会严重拖慢训练）。
+  • 8GB 显存若 OOM：data.batch_size=6 或 4。
+  • Windows 在线解码必须用 num_workers=0；读 .pt 缓存可用 num_workers=2。
+  • test  split 缓存可选（训练/验证不强制）；推理或 test 阶段再 build 即可：
+      python scripts/build_video_cache.py --split test --workers 2
+  • 快速路径日志：D:\ERDES\logs\decoupled_fast_train.log
+  • Hydra 输出：logs/train/runs/rd/resnet3d_decoupled_fast/<timestamp>/
+
+
+八、与历次更改的关系
+--------------------------------------------------------------------------------
+  second_summary  — 首次提出 CachedVideoDataset + decoupled_fast（缓存未建）
+  third_summary   — erdes_gpu 在线路径 + GPU resize + 进度回调（慢但可跑）
+  forth_summary   — 15 epoch + 变慢原因分析（num_workers=0 后更慢至 ~2h/epoch）
+  fifth_summary   — Grad-CAM3D（与训练并行会抢 GPU）
+  sixth_summary   — 本文件：并行建缓存 + fast 路径落地 + 停慢训改快训
+
+
+九、历次更改索引
+--------------------------------------------------------------------------------
+  first_summary.txt   — 两阶段解耦（原 50 epoch 设计）
+  second_summary.txt  — D 盘缓存 + fast 实验（设计）
+  third_summary.txt   — 单进程、进度日志、GPU resize
+  forth_summary.txt   — 15 epoch 解耦配置、停训与变慢原因
+  fifth_summary.txt   — Grad-CAM3D 可视化
+  sixth_summary.txt   — 训练加速落地（本文件）
+
+================================================================================

@@ -1,0 +1,39 @@
+_target_: erdes.models.decoupled_model_module.DecoupledModelModule
+
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 1.5e-05
+  weight_decay: 0.0
+
+scheduler:
+  _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+  _partial_: true
+  mode: max
+  factor: 0.1
+  patience: 8
+
+net:
+  _target_: erdes.models.components.factory.build_3d_architecture
+  model_name: resnet3d
+  pooling: topk
+  topk_ratio: 0.5
+
+compile: false
+
+# --- Two-stage decoupled training (non_rd_vs_rd) ---
+train_csv: ${data.train_csv}
+stage1_end_epoch: 11
+stage2_start_epoch: 11
+total_epochs: 15
+logit_adjustment_tau: 1.0
+mixup_alpha: 0.2
+mixup_enabled: true
+stage2_lr: 1.5e-05
+decision_threshold: 0.5
+label_column: label
+
+# Pad/resize/normalize on GPU after batch transfer (see erdes/training/gpu_video_ops.py)
+gpu_preprocess: true
+video_size: [96, 128, 128]
+compute_train_metrics: true

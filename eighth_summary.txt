@@ -1,0 +1,121 @@
+================================================================================
+  第八次更改说明 — 实验三：VideoMAE 思想 + Swin-UNETR 自监督时空掩码预训练
+================================================================================
+
+一、实验目标
+--------------------------------------------------------------------------------
+  • 在不使用标签的前提下，对超声 3D 视频做 VideoMAE 式自监督预训练。
+  • 骨干：项目现有 SwinUnetrEncoder（Swin-UNETR 编码器，与分类实验一致）。
+  • 掩码：Tube Masking（时间 D 轴上同一 (H,W) 位置掩码状态一致），mask_ratio=0.95（约 5% 管可见）。
+  • 训练 15 epoch 后，将 Encoder 权重单独保存为 weights/swinunetr_videomae_backbone.pth，
+    供后续有监督微调（如 non_rd_vs_rd / swinunetr.yaml）加载。
+
+
+二、核心模块说明
+--------------------------------------------------------------------------------
+
+1) erdes/models/components/videomae_mask.py
+   • class TubeMaskingGenerator3D
+     - 输入 token 网格形状 (D, H, W)，默认由视频尺寸推导为瓶颈 token 网格 (3, 4, 4)。
+     - mask_ratio=0.95：在 H×W 个「管」(tube) 中随机掩蔽 95% 的空间管，沿 D 轴广播 → 时空管一致。
+     - 输出 bool 张量 [B, 1, D, H, W]，True = 被掩蔽（需在重建损失中监督）。
+     - 工具方法 token_shape_from_video() / patch_token_shape() 用于从 (96,128,128) 推算网格。
+
+2) erdes/models/components/swinunetr_videomae_pretrain.py
+   • class TransformerBlock3D — 标准 Pre-LN Transformer block（解码器用）。
+   • class MAEDecoder3D
+     - 3 层 TransformerBlock3D。
+     - 可学习 [MASK] token；将 Encoder 瓶颈特征与 mask 位置占位符拼成全长序列。
+     - 线性头预测每个瓶颈 token 对应体素的像素块（patch_volume ≈ 32×32×32），拼回整幅 [B,1,96,128,128]。
+   • class SwinUNETRVideoMAEPretrain
+     - self.encoder = SwinUnetrEncoder(...)（现有实现，未改结构）。
+     - forward_encoder_visible_only(x, tube_mask)：
+         将管掩码上采样到像素分辨率，被掩蔽管在输入体素上置零，仅保留约 5% 可见管的信号，
+         再调用 Swin-UNETR Encoder；被掩蔽区域无有效输入，不参与有效特征提取。
+     - forward(x)：生成管掩码 → 可见管编码 → 解码重建 → 仅对掩蔽管像素计算 MSE。
+
+3) run_pretrain_swinunetr.py（项目根目录）
+   • UnlabeledVideoDataset：合并 train/val CSV 路径，仅从 D: 缓存读视频张量（无标签）。
+   • 默认 15 epoch、batch_size=2、AdamW lr=1e-4、AMP（CUDA）。
+   • 依赖：D:/ERDES/cache/non_rd_vs_rd（需先 build_video_cache.py）。
+   • 结束保存：weights/swinunetr_videomae_backbone.pth（仅 encoder.state_dict()）。
+
+
+三、本次新建 / 修改文件清单
+--------------------------------------------------------------------------------
+
+【新建】
+
+1.  erdes/models/components/videomae_mask.py
+2.  erdes/models/components/swinunetr_videomae_pretrain.py
+3.  run_pretrain_swinunetr.py
+4.  eighth_summary.txt（本文件）
+
+【修改】
+
+  无（未改动现有 SwinUnetrEncoder / 分类训练入口，保证实验一、二可复现）。
+
+
+四、数据流与掩码分辨率
+--------------------------------------------------------------------------------
+
+  缓存 .pt [C,D,H,W]
+       ↓
+  TubeMaskingGenerator3D → mask [B,1,3,4,4]  (瓶颈 token 网格)
+       ↓
+  掩蔽管像素置零 → SwinUnetrEncoder → 瓶颈特征 [B,384,3,4,4]
+       ↓
+  MAEDecoder3D（3×Transformer + 像素头）→ 重建视频
+       ↓
+  MSE 仅在被掩蔽管对应像素上（mask_ratio=0.95 区域）
+
+
+五、启动预训练
+--------------------------------------------------------------------------------
+
+  # 若无缓存，先构建：
+  python scripts/build_video_cache.py --split all --workers 4
+
+  # 预训练 15 epoch（默认）：
+  python run_pretrain_swinunetr.py
+
+  # 常用参数：
+  python run_pretrain_swinunetr.py --epochs 15 --batch-size 2 --device cuda --log-every 50
+
+  输出权重：
+  weights/swinunetr_videomae_backbone.pth
+
+
+六、与 VideoMAE 论文的对应关系
+--------------------------------------------------------------------------------
+
+  | 论文要素              | 本实现                                      |
+  |-----------------------|---------------------------------------------|
+  | Tube / tube masking   | TubeMaskingGenerator3D，(H,W) 管 + D 广播   |
+  | 高掩码率 (~90%+)       | mask_ratio=0.95                             |
+  | Encoder 只看可见内容   | 掩蔽管像素置零后过 Swin-UNETR               |
+  | [MASK] token + Decoder | MAEDecoder3D.mask_token + 3 层 Transformer  |
+  | 像素重建 MSE           | 仅 masked tube 像素                         |
+
+
+七、后续有监督微调（建议）
+--------------------------------------------------------------------------------
+
+  在 SwinUnetrClassifier 初始化后加载预训练骨干：
+
+    state = torch.load("weights/swinunetr_videomae_backbone.pth", map_location="cpu")
+    model.enc.load_state_dict(state, strict=True)
+
+  再运行 experiment=non_rd_vs_rd/swinunetr 等配置进行 15 epoch 微调对比。
+
+
+八、实现说明（专家向）
+--------------------------------------------------------------------------------
+
+  • 瓶颈 token 形状 (3,4,4) 对应输入 (96,128,128)、patch_size=2、4 次 PatchMerging。
+  • 每管覆盖像素块约 (32,32,32)，与 Swin 下采样一致，解码器按块拼回体积。
+  • 若需更细粒度掩码，可将 TubeMaskingGenerator3D 的 token_shape 改为 patch_token_shape
+    (48,64,64)，并同步调整解码器 token 网格与 patch_volume（当前默认瓶颈级以控制显存）。
+  • Windows 建议 num_workers=0；显存不足时减小 --batch-size。
+
+================================================================================

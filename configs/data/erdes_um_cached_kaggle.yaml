@@ -1,0 +1,24 @@
+# UM precomputed cache — Kaggle layout (override paths if your Dataset name differs)
+# Expected Dataset structure (example):
+#   /kaggle/input/erdes-um-cache/non_rd_vs_rd/*.pt          # optional base
+#   /kaggle/input/erdes-um-cache/non_rd_vs_rd_um/*.pt       # UM tensors
+#   /kaggle/input/erdes-splits/non_rd_vs_rd/{train,val,test}.csv
+# Code repo mounted as /kaggle/working/test_5 or similar.
+
+_target_: erdes.data.erdes_datamodule.ERDESDataModule
+data_root: "/kaggle/input/erdes-raw/data/erdes"
+train_csv: "/kaggle/input/erdes-splits/non_rd_vs_rd/train.csv"
+val_csv: "/kaggle/input/erdes-splits/non_rd_vs_rd/val.csv"
+test_csv: "/kaggle/input/erdes-splits/non_rd_vs_rd/test.csv"
+size: [96, 128, 128]
+batch_size: 4
+num_workers: 2
+pin_memory: true
+persistent_workers: false
+use_cache: true
+cache_dir: "/kaggle/input/erdes-um-cache/non_rd_vs_rd"
+um_cache_dir: "/kaggle/input/erdes-um-cache/non_rd_vs_rd_um"
+cache_mmap: true
+defer_resize: false
+use_um: true
+um_strength: 1.5

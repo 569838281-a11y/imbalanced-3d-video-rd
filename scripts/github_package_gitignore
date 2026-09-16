@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.Python
+*.egg-info/
+.venv/
+venv/
+
+# Training artifacts
+logs/
+*.log
+*.ckpt
+lightning_logs/
+wandb/
+outputs/
+multirun/
+.hydra/
+
+# Large / local data
+data/erdes/
+weights/*.pth
+*.mp4
+*.avi
+*.pt
+D:/ERDES/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Checkpoints & plots from local runs
+**/checkpoints/
+**/tensorboard/
+GradCAM/

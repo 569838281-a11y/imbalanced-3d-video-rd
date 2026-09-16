@@ -1,0 +1,188 @@
+================================================================================
+  第十次更改说明 — MONAI SSL Swin-UNETR 微调：checkpoint / 加速路径 / 运维补丁
+  （承接第九次实验 swinunetr_monai_ssl，无 UM）
+================================================================================
+
+一、更改背景
+--------------------------------------------------------------------------------
+  第九次已接入 MONAI 官方 SSL 预训练 Swin-UNETR 的 15 轮有监督二分类微调（无 UM）。
+  落地运行后又出现三类需求：
+
+  1. 每轮都要留权重，便于对比 epoch 1～15 与回滚。
+  2. 官方 SSL 新版 .pth 键名为 encoder.*，旧版 load_from() 会 KeyError（已修复）。
+  3. 训练极慢，需 D: 缓存等加速手段，并每 10 step 打进度。
+
+  第十次分两阶段迭代：
+    • 阶段 A：全量 Lightning checkpoint 每 epoch 保存（save_top_k=-1）。
+    • 阶段 B（当前推荐）：swinunetr_monai_ssl_fast — 缓存 + 大 batch + 每轮仅存 encoder。
+
+
+二、阶段 A — 每轮保存全量 checkpoint
+--------------------------------------------------------------------------------
+
+  修改（configs/experiment/non_rd_vs_rd/swinunetr_monai_ssl.yaml）：
+    save_top_k: 1  →  -1
+    every_n_epochs: 1
+    save_last: true
+    filename: "swinunetr_monai_ssl_epoch_{epoch:03d}"
+
+  保存路径：
+    logs/train/runs/rd/swinunetr_monai_ssl/<时间戳>/checkpoints/swinunetr_monai_ssl/
+      swinunetr_monai_ssl_epoch_001.ckpt … epoch_015.ckpt, last.ckpt
+
+  启动：scripts/start_swinunetr_monai_ssl_train.ps1
+
+  实测：在线解码 + batch=2 时，约 step 20/1937 即需数分钟；15 个全量 ckpt 磁盘写入
+  很重。该路线已停用以改用阶段 B 加速配置。
+
+
+三、阶段 B — 加速微调（当前推荐）
+--------------------------------------------------------------------------------
+
+  新建 configs/experiment/non_rd_vs_rd/swinunetr_monai_ssl_fast.yaml
+
+  | 配置项              | 慢路径 (swinunetr_monai_ssl) | 快路径 (_fast)              |
+  |---------------------|------------------------------|-----------------------------|
+  | 数据                | erdes，在线 mp4               | erdes_cached，D: .pt 缓存   |
+  | batch_size          | 2                            | 4                           |
+  | steps/epoch (train) | ~1937                        | ~969                        |
+  | 编码器 checkpoint   | 无                           | use_checkpoint=true（省显存）|
+  | 每轮权重            | 15× 全量 .ckpt               | encoder_epoch_XXX.pth（轻量）|
+  | Lightning ckpt      | save_top_k=-1 全保留         | save_top_k=1 + last（best）   |
+
+  新建 erdes/callbacks/encoder_epoch_checkpoint_callback.py
+    • 每个 train epoch 结束保存 net.backbone.state_dict()
+    • 文件：encoder_epoch_{epoch:03d}.pth（仅 Swin-UNETR 骨干，非整包 Lightning）
+
+  新建 scripts/start_swinunetr_monai_ssl_fast_train.ps1
+    • 检查 D: 缓存 ≥4300 个 .pt
+    • 启动前自动结束已有 train.py 进程
+    • 日志：D:\ERDES\logs\swinunetr_monai_ssl_fast_train.log
+    • 进度：D:\ERDES\logs\swinunetr_monai_ssl_fast_progress.log
+
+  启动：
+    powershell -ExecutionPolicy Bypass -File scripts/start_swinunetr_monai_ssl_fast_train.ps1
+
+
+四、SSL 权重加载修复（第九次文档更正）
+--------------------------------------------------------------------------------
+  权重 URL：
+    https://github.com/Project-MONAI/MONAI-extra-test-data/releases/download/0.8.1/ssl_pretrained_weights.pth
+  本地：weights/ssl_pretrained_weights.pth（约 719 MB）
+
+  新版结构：ckpt["model"]，键名 encoder.patch_embed.* / encoder.layers*.*
+  旧版 load_from() 期望 module.* → KeyError。
+
+  erdes/models/components/monai_ssl_swinunetr.py：
+    apply_monai_ssl_weights_to_swinunetr()
+      • legacy → SwinUNETR.load_from()
+      • 新版 → copy_model_state(..., filter_func=filter_swinunetr)
+    实测：157 张量载入，2 个 out.conv.* 跳过（分割头，分类不需要）
+
+
+五、训练进度与运维
+--------------------------------------------------------------------------------
+  • TrainingProgressCallback，log_every_n_steps=10
+  • trainer.log_every_n_steps=10
+  • callbacks.rich_progress_bar=null（避免 Windows GBK + Rich 的 Unicode 崩溃）
+  • 慢路径进度文件：D:/ERDES/logs/swinunetr_monai_ssl_progress.log
+  • 快路径进度文件：D:/ERDES/logs/swinunetr_monai_ssl_fast_progress.log
+
+
+六、为何本实验 Swin-UNETR 比前两个实验（基础 ResNet3D、UM+ResNet3D）慢得多
+--------------------------------------------------------------------------------
+
+  前两个实验对比：
+    实验一：基础 ResNet3D 15 epoch（无 UM，可选 D: 缓存后 ~10–20 min/epoch 量级）
+    实验二：ResNet3D + UM 15 epoch（离线 UM 缓存后速度与实验一接近）
+
+  本实验（MONAI SSL Swin-UNETR）更慢，主要原因如下：
+
+  （1）模型容量与结构复杂度
+    • 官方 SSL 权重绑定 feature_size=48 → 瓶颈通道 16×48=768。
+    • 项目内自建 SwinUnetrEncoder 为 feature_size=24（384 通道），参数量与 FLOPs 更小。
+    • ResNet3D（实验一/二）为卷积残差栈，单 step 前向/反向通常明显轻于 3D Swin 窗口注意力。
+
+  （2）算子与实现路径
+    • Swin-UNETR 含多层 3D Window Attention、Patch Merging、shifted window，
+      显存与计算随特征图阶段变化，kernel 启动与临时显存开销大于纯 CNN。
+    • 快路径开启 use_checkpoint=true：用重算换显存，允许 batch=4，但单 step 时间
+      仍长于 ResNet3D 的一个 step。
+
+  （3）数据管线差异（慢路径尤甚）
+    • 实验一/二在「fast」配置下均读 D: 预缓存 .pt（无在线 PyAV 解码、无 OpenCV UM）。
+    • 慢路径 swinunetr_monai_ssl 曾用 use_cache=false + batch=2：
+        每 step 在线解码 mp4 → I/O 与 CPU 解码占满时间，step 数还多（~1937）。
+    • 快路径改为缓存后，step 数约减半（batch 4 → ~969），为当前推荐设置。
+
+  （4）checkpoint 与日志开销
+    • 阶段 A 每 epoch 写 15 份全量 Lightning ckpt（数百 MB 级/个），epoch 末磁盘
+      阻塞明显。
+    • 阶段 B 改为 encoder_epoch_XXX.pth，仅写骨干，I/O 压力小很多。
+    • 每 10 step 打印进度对总时间影响很小；save_top_k=-1 的全量保存才是额外拖累。
+
+  （5）首次运行附加成本
+    • 首次需下载 SSL 权重 ~719 MB（仅一次）。
+    • MONAI SwinUNETR 首次前向会触发 cuDNN 算法选型，前几个 step 偏慢属正常。
+
+  粗算对比（15 epoch，同一 RTX 4060 Laptop 8GB 量级，仅供参考）：
+
+    | 实验                     | 典型单 epoch | 15 epoch 粗算   |
+    |--------------------------|--------------|-----------------|
+    | ResNet3D（缓存 fast）    | 10–20 min    | 约 2.5–5 h      |
+    | ResNet3D+UM（缓存 fast）   | 10–20 min    | 约 2.5–5 h      |
+    | Swin SSL 慢路径（在线 bs2）| 2–6+ h       | 数天            |
+    | Swin SSL 快路径（缓存 bs4）| 20–60 min    | 约 5–15 h       |
+
+  结论：慢的主因不是「二分类任务变难」，而是 **3D Swin-UNETR（48 维 SSL 骨干）**
+  本身更重，再叠加 **未用缓存、小 batch、全量 checkpoint** 等工程因素。
+  使用 swinunetr_monai_ssl_fast 可拉近与 ResNet3D fast 的数量级差距，但仍通常
+  慢于 ResNet3D 同一硬件上的单 epoch 时间。
+
+
+七、本次修改 / 新建文件清单（汇总）
+--------------------------------------------------------------------------------
+
+【新建】
+  1. erdes/callbacks/encoder_epoch_checkpoint_callback.py
+  2. configs/experiment/non_rd_vs_rd/swinunetr_monai_ssl_fast.yaml
+  3. scripts/start_swinunetr_monai_ssl_fast_train.ps1
+  4. tenth_summary.txt（本文件，含阶段 A/B 与慢因分析）
+
+【修改】
+  5. configs/experiment/non_rd_vs_rd/swinunetr_monai_ssl.yaml
+       — save_top_k=-1, every_n_epochs=1, training_progress
+  6. scripts/start_swinunetr_monai_ssl_train.ps1
+  7. erdes/models/components/monai_ssl_swinunetr.py
+       — apply_monai_ssl_weights_to_swinunetr；build_* 支持 use_checkpoint
+  8. erdes/models/components/encoders/building_blocks.py
+       — grad_ckpt.checkpoint 修复 use_checkpoint 时 NameError
+
+
+八、启动命令速查
+--------------------------------------------------------------------------------
+
+  慢路径（全量每 epoch ckpt，不推荐长期使用）：
+    scripts/start_swinunetr_monai_ssl_train.ps1
+
+  快路径（推荐）：
+    scripts/start_swinunetr_monai_ssl_fast_train.ps1
+
+  前提：
+    python scripts/build_video_cache.py --split all --workers 4
+    weights/ssl_pretrained_weights.pth 已存在或可自动下载
+
+
+九、与第九次关系
+--------------------------------------------------------------------------------
+  | 项目           | 第九次              | 第十次（A+B）                    |
+  |----------------|---------------------|----------------------------------|
+  | 实验入口       | swinunetr_monai_ssl | + swinunetr_monai_ssl_fast       |
+  | UM             | 关闭                | 关闭                             |
+  | Epoch          | 15                  | 15                               |
+  | SSL 加载       | 文档写 load_from    | copy_model_state 兼容新版权重    |
+  | Checkpoint     | best+last           | A: 全量×15；B: encoder×15+best   |
+  | 数据           | 默认在线            | B: D: 缓存                       |
+  | 进度           | —                   | 每 10 step                       |
+
+================================================================================

@@ -1,0 +1,150 @@
+================================================================================
+  两阶段解耦训练（Two-Stage Decoupling Training）实现说明
+  任务：non_rd_vs_rd（第一阶段 RD vs 非RD）| 总轮数 50
+================================================================================
+
+一、本次修改/新增的文件清单
+--------------------------------------------------------------------------------
+
+【新增 — 不平衡学习工具包 erdes/training/】
+
+1. erdes/training/__init__.py
+   - 导出本包公共 API（先验估计、Logit 调整、阈值搜索、冻结骨干、Mixup）。
+
+2. erdes/training/class_priors.py
+   - 新增 ClassPriorEstimator 数据类：从训练 CSV 统计 pi_negative、pi_positive。
+   - 新增 compute_binary_priors_from_csv()：读取 label 列并返回两类先验概率。
+
+3. erdes/training/logit_adjustment.py
+   - 新增 LogitAdjuster(nn.Module)：实现 z' = z - tau*(log(pi_1)-log(pi_0))。
+   - 提供 enable()/disable()，阶段二开启、阶段一关闭。
+
+4. erdes/training/threshold_search.py
+   - 新增 collect_binary_probs_and_labels()：在验证集上收集概率与标签。
+   - 新增 find_best_threshold_under_precision_constraint()：在 Precision>=约束 下最大化 Recall，并计算 PR-AUC、F1。
+   - 新增 plot_pr_curve()、save_threshold_results()：保存 PR 图与 JSON 结果。
+
+5. erdes/training/backbone_utils.py
+   - 新增 get_head_parameter_names()、head_parameters()、backbone_parameters()。
+   - 新增 freeze_backbone()：冻结除 cls/fc 分类头外的全部参数（适配 topk ResNet 的 enc+cls 结构）。
+
+6. erdes/training/mixup.py
+   - 新增 mixup_data()：阶段一轻量 Beta-Mixup，输出软标签供 BCEWithLogitsLoss 使用。
+
+
+【新增 — Lightning 模块与回调】
+
+7. erdes/models/decoupled_model_module.py
+   - 新增 DecoupledModelModule(LightningModule)，不修改原 model_module.py。
+   - 阶段一（epoch 0–34，即第 1–35 轮）：全网络训练 + 可选 Mixup；Logit Adjustment 关闭。
+   - 阶段二（epoch 35–49，即第 36–50 轮）：on_train_epoch_start 触发 _enter_stage2()：
+       * freeze_backbone() 冻结骨干
+       * logit_adjuster.enable()
+       * _reconfigure_optimizer_for_stage2() 仅用 requires_grad=True 的参数重建 Adam，避免 PyTorch 优化器报错
+   - 记录 val/f1、val/pr_auc、val/sensitivity、val/precision；checkpoint 建议监控 val/f1。
+   - 提供 set_decision_threshold() 供训练后回调更新决策阈值。
+
+8. erdes/callbacks/__init__.py
+   - 导出 PRThresholdSearchCallback。
+
+9. erdes/callbacks/pr_threshold_callback.py
+   - 新增 PRThresholdSearchCallback：在 on_fit_end（第 50 轮结束后）对验证集绘制 PR 曲线、
+     搜索满足 Precision>=0.5 的最佳阈值，写入 best_threshold.json 与 pr_curve_val.png，
+     并调用 model.set_decision_threshold()。
+
+
+【新增 — Hydra 配置】
+
+10. configs/model/resnet3d_decoupled.yaml
+    - 指定 _target_ 为 DecoupledModelModule。
+    - 配置 stage1_end_epoch=35、stage2_start_epoch=35、total_epochs=50、tau、mixup、stage2_lr 等。
+
+11. configs/experiment/non_rd_vs_rd/resnet3d_decoupled.yaml
+    - 一键实验配方：non_rd_vs_rd + 解耦 ResNet3D + decoupled 回调 + PR 阈值搜索。
+    - trainer.max_epochs=50、min_epochs=50；checkpoint/early_stopping 监控 val/f1。
+
+12. configs/callbacks/decoupled.yaml
+    - 默认以 val/f1 为监控指标的 checkpoint 与 early stopping 模板。
+
+
+【未修改但相关的原有文件】
+
+- erdes/train.py：仍为统一入口，通过 experiment=non_rd_vs_rd/resnet3d_decoupled 加载新模块。
+- erdes/data/components/erdes_dataset.py：数据读取逻辑不变。
+- erdes/models/components/cls_model.py：ClassificationHead（fc1/fc2）作为阶段二可训练头。
+- erdes/models/model_module.py：保留原标准训练路径，与解耦训练并存。
+
+
+二、新架构在 50 轮训练中如何协同提升 RD 召回率
+--------------------------------------------------------------------------------
+
+整体思路：先「学好特征」，再「按类别先验校正决策边界」，最后「用验证集 PR 曲线选阈值」，
+避免在不平衡数据上仅用 0.5 阈值和 Acc 导向训练导致 RD（正类）召回偏低。
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 阶段一：表征学习（Epoch 1–35，Lightning current_epoch 0–34）                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • 数据：保持原始 non_rd_vs_rd 不平衡分布（约 9% RD）                            │
+│ • 网络：ResNet3D 骨干 + topk 池化 + 分类头 全部可训练                           │
+│ • 损失：BCEWithLogitsLoss（可选 Mixup 软标签，增强表征鲁棒性）                   │
+│ • Logit Adjustment：关闭（不改变 logits）                                     │
+│ • 目标：让 enc 学到对 RD/非RD 都可分的时空特征，相当于 Decoupling 的            │
+│   Representation Learning 阶段                                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 阶段二：分类头微调 + Logit Adjustment（Epoch 36–50，current_epoch 35–49）     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • 动作：freeze_backbone()，仅 cls 中 fc1/fc2 可训练                            │
+│ • Logit Adjustment：z' = z - τ·(log π_RD - log π_nonRD)                       │
+│   因 π_RD 很小，减去正偏移等效于降低 RD 阳性判定门槛 → 提升 Recall              │
+│ • Optimizer：重建 Adam，仅传入 requires_grad=True 参数（稳健性保证）            │
+│ • 监控：val/f1、val/pr_auc、val/sensitivity 写入 TensorBoard 与进度条          │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 后处理：PR 曲线阈值移动（第 50 轮训练结束后自动执行）                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • PRThresholdSearchCallback 在验证集上扫描阈值                                │
+│ • 约束：Precision ≥ 0.5（可配置）                                            │
+│ • 目标：在该约束下 Recall 最大 → 得到 best_threshold                          │
+│ • 输出：best_threshold.json、pr_curve_val.png                                 │
+│ • 替代默认 0.5，在保持精度底线的同时进一步拉高 RD 召回                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+三、推荐启动命令
+--------------------------------------------------------------------------------
+
+  cd C:\Users\ADMIN\Desktop\test_5
+  conda activate erdes
+  set KMP_DUPLICATE_LIB_OK=TRUE
+
+  python erdes/train.py experiment=non_rd_vs_rd/resnet3d_decoupled tags=[erdes,decoupled]
+
+  可选覆盖：
+    python erdes/train.py experiment=non_rd_vs_rd/resnet3d_decoupled ^
+      data.batch_size=4 callbacks.pr_threshold_search.min_precision=0.5 ^
+      model.logit_adjustment_tau=1.0
+
+
+四、训练输出物（位于当次 Hydra 运行目录，非 logs 分析内容）
+--------------------------------------------------------------------------------
+
+  - checkpoints/decoupled_best_epoch_*.ckpt
+  - best_threshold.json   （最佳阈值、Recall、Precision、F1、PR-AUC）
+  - pr_curve_val.png      （验证集 PR 曲线）
+  - TensorBoard：val/f1、val/pr_auc、val/sensitivity、train/stage（1 或 2）
+
+
+五、注意事项
+--------------------------------------------------------------------------------
+
+1. 请使用 pooling=topk 的 ResNet（当前 resnet3d_decoupled 配置），以便清晰区分 enc 与 cls 头。
+2. 若使用 pooling=avg 的单体 MONAI ResNet，需在 backbone_utils.HEAD_NAME_FRAGMENTS 中确认 fc 层名称。
+3. 阶段切换发生在 epoch 36 开始时（current_epoch==35）；日志会打印 [Decoupled] >>> Entering Stage 2。
+4. 原 experiment=non_rd_vs_rd/resnet3d 仍使用 ModelModule，不受本次改动影响。
+
+================================================================================
+  文档结束
+================================================================================

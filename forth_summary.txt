@@ -1,0 +1,125 @@
+================================================================================
+  第四次更改说明 — 总轮次改为 15、停止当前训练、变慢原因说明
+  方法不变：两阶段解耦 + Mixup + Logit Adjustment + PR 阈值后处理
+  详见：first_summary.txt ~ third_summary.txt
+================================================================================
+
+一、本次操作（第四次）
+--------------------------------------------------------------------------------
+  1. 已结束当前训练进程 PID 25148（及关联 DataLoader worker）。
+  2. 将解耦实验总轮次由 50 调整为 15（与早期 resnet3d 单次训练 15 epoch 对齐）。
+  3. 两阶段划分按原 50 轮比例缩放（阶段一约 70%、阶段二约 30%）：
+       • 阶段一：第 1–11 轮（全网络 + Mixup，Logit Adjustment 关）
+       • 阶段二：第 12–15 轮（冻结骨干 + Logit Adjustment 开）
+       • 配置：stage1_end_epoch=11, stage2_start_epoch=11, total_epochs=15
+         （Lightning 在 current_epoch==11 时进入阶段二，即第 12 轮起）
+  4. 算法与第三次一致（DecoupledModelModule、GPU 侧 resize、进度回调等均未回退）。
+
+
+二、修改的配置文件（第四次）
+--------------------------------------------------------------------------------
+  • configs/experiment/non_rd_vs_rd/resnet3d_decoupled.yaml
+      trainer.min_epochs / max_epochs: 50 → 15
+      model.stage1_end_epoch: 35 → 11
+      model.stage2_start_epoch: 35 → 11
+      model.total_epochs: 50 → 15
+
+  • configs/model/resnet3d_decoupled.yaml（同上 stage/epoch 字段）
+
+  • configs/experiment/non_rd_vs_rd/resnet3d_decoupled_fast.yaml（与线上一致，便于缓存版）
+
+  • scripts/start_decoupled_train.ps1（注释标明 15 epochs）
+
+
+三、重新启动训练（15 轮）
+--------------------------------------------------------------------------------
+  powershell -ExecutionPolicy Bypass -File scripts\start_decoupled_train.ps1
+
+  或：
+
+  cd C:\Users\ADMIN\Desktop\test_5
+  $env:PYTHONUNBUFFERED="1"
+  $env:TMP="D:\ERDES\temp"; $env:TEMP="D:\ERDES\temp"
+  python -u erdes/train.py experiment=non_rd_vs_rd/resnet3d_decoupled tags=[erdes,decoupled,15ep]
+
+  预计耗时（沿用当前在线解码速度 ~3.3 s/step）：
+    • 单 epoch ≈ 55–60 分钟
+    • 15 epoch 合计 ≈ 14–15 小时（连续不中断）
+
+
+四、相较「初始代码」训练更慢的原因（重要）
+--------------------------------------------------------------------------------
+  此处「初始代码」指：experiment=non_rd_vs_rd/resnet3d + 原 ModelModule，
+  在相同数据与 batch_size=4 下，日志约 0.25 it/s、单 epoch 约 60–65 分钟；
+  当前 decoupled + erdes_gpu 实测约 0.30 step/s（~3.3 s/step），单 epoch 相近或略慢。
+  若感觉「明显更慢」，通常来自以下叠加因素：
+
+  【1】数据路径：每 step 现场解码 mp4（主因，与是否 decoupled 无关）
+      • VideoDataset + PyAV：每个样本读盘、解码最多 160 帧、再采样 96 帧。
+      • 训练集 3873 条 → batch=4 → 每 epoch 969 step；解码占大部分时间，GPU 常空等。
+      • 第二次更改提供的 D 盘 .pt 缓存（resnet3d_decoupled_fast）未构建时，无法加速。
+      • 初始 resnet3d 同样在线解码，故单 epoch 量级相同；未使用缓存则不会比初始快。
+
+  【2】第三次：defer_resize + GPU 预处理（额外开销）
+      • 初始代码在 CPU 的 Dataset 内完成 pad + trilinear resize（utils.resize）。
+      • 现改为 CPU 只解码，batch 内 pad 对齐（pad_video_batch_collate），再在 GPU 做
+        trilinear resize（gpu_video_ops）。多一次 GPU 上逐样本 interpolate，且 batch
+        内分辨率不一致时无法完全向量化，略增每 step 时间。
+      • 收益是减轻 CPU 算力占用，但瓶颈仍在 PyAV，整体 epoch 时间不会缩短。
+
+  【3】DataLoader 与进程
+      • num_workers=2（配置）时实际可能出现多个 worker 子进程，RAM ~9GB。
+      • persistent_workers、pin_memory 有利于稳定，但子进程同时抢磁盘读 mp4。
+      • 曾同时运行两个 train.py，显存/磁盘争抢会使观感「卡死」；已按第三次要求改为单进程。
+
+  【4】解耦方法本身的计算（相对初始 ModelModule 略增）
+      • Mixup（阶段一）、阶段二 Logit Adjustment、更多 val 指标（含 PR-AUC）。
+      • 相对解码可忽略，但每 step 前向/反向略重于纯 BCE ResNet3D。
+
+  【5】日志与观感（不等于算得慢）
+      • 早期关闭 rich 进度条 + 管道缓冲 → 长时间无输出，误以为卡住。
+      • 第三次已加 TrainingProgressCallback 与 PYTHONUNBUFFERED。
+
+  【6】与「15 epoch 就跑完」的初始 run 对比
+      • 初始 resnet3d 在 epoch 16 因 CPU OOM 中断前，已完成 15 个完整 epoch（约 15×65 min）。
+      • 当前 decoupled 若跑满 15 epoch，总墙钟时间量级相近（~14–15 h），并非算法多训 50 轮。
+
+  【如何接近初始速度或更快】
+      • 构建缓存：python scripts/build_video_cache.py --split all
+      • 训练：experiment=non_rd_vs_rd/resnet3d_decoupled_fast（目标 ~10 min/epoch）
+      • 或继续用 resnet3d（非解耦）且保持 batch=4、单进程、避免双开训练。
+
+
+五、历次更改索引（first → fourth）
+--------------------------------------------------------------------------------
+  first_summary.txt   — 两阶段解耦训练实现（50 epoch，Mixup/LA/PR 阈值）
+  second_summary.txt  — D 盘视频缓存 + resnet3d_decoupled_fast（~10 min/epoch）
+  third_summary.txt   — 杀重复进程、训练进度打印、GPU resize、erdes_gpu
+  forth_summary.txt   — 本文件：15 epoch、停训、变慢原因、配置清单
+
+
+六、核心代码文件清单（截至第四次，方法未回退）
+--------------------------------------------------------------------------------
+  训练逻辑：
+    erdes/models/decoupled_model_module.py
+    erdes/training/{class_priors,logit_adjustment,mixup,backbone_utils,threshold_search,gpu_video_ops}.py
+    erdes/callbacks/{pr_threshold_callback,training_progress_callback}.py
+
+  数据：
+    erdes/data/components/erdes_dataset.py      （defer_resize）
+    erdes/data/collate.py                       （pad_video_batch_collate）
+    erdes/data/erdes_datamodule.py
+    erdes/data/components/cached_video_dataset.py
+    scripts/build_video_cache.py
+
+  配置入口：
+    configs/experiment/non_rd_vs_rd/resnet3d_decoupled.yaml   ← 默认 15 epoch
+    configs/experiment/non_rd_vs_rd/resnet3d_decoupled_fast.yaml
+    configs/data/erdes_gpu.yaml
+    configs/model/resnet3d_decoupled.yaml
+
+  启动：
+    scripts/start_decoupled_train.ps1
+    erdes/train.py
+
+================================================================================

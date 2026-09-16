@@ -1,0 +1,77 @@
+# @package _global_
+# Two-stage decoupled training for non_rd_vs_rd (maximize RD recall)
+
+defaults:
+  - override /data: erdes_gpu
+  - override /model: resnet3d_decoupled
+  - override /callbacks: decoupled
+  - override /trainer: default
+  - override /logger: tensorboard
+
+tags: ["erdes", "resnet3d", "decoupled", "non_rd_vs_rd"]
+
+seed: 42
+
+trainer:
+  min_epochs: 15
+  max_epochs: 15
+  gradient_clip_val: 1.0
+  enable_progress_bar: true
+  log_every_n_steps: 25
+
+model:
+  train_csv: ${data.train_csv}
+  stage1_end_epoch: 11
+  stage2_start_epoch: 11
+  total_epochs: 15
+  logit_adjustment_tau: 1.0
+  mixup_alpha: 0.2
+  mixup_enabled: true
+  stage2_lr: 1.5e-05
+
+data:
+  batch_size: 4
+  num_workers: 0
+  persistent_workers: false
+  defer_resize: true
+  train_csv: "data/splits/non_rd_vs_rd/train.csv"
+  val_csv: "data/splits/non_rd_vs_rd/val.csv"
+  test_csv: "data/splits/non_rd_vs_rd/test.csv"
+
+logger:
+  tensorboard:
+    prefix: "resnet3d_decoupled"
+
+callbacks:
+  model_checkpoint:
+    dirpath: ${paths.output_dir}/checkpoints/resnet3d_decoupled
+    filename: "decoupled_best_epoch_{epoch:03d}"
+    monitor: "val/f1"
+    mode: "max"
+    save_top_k: 1
+    save_last: true
+    auto_insert_metric_name: false
+    verbose: true
+
+  early_stopping:
+    monitor: "val/f1"
+    patience: 20
+    mode: "max"
+    min_delta: 0.001
+
+  rich_progress_bar: null
+
+  training_progress:
+    _target_: erdes.callbacks.training_progress_callback.TrainingProgressCallback
+    log_every_n_steps: 25
+
+  pr_threshold_search:
+    _target_: erdes.callbacks.pr_threshold_callback.PRThresholdSearchCallback
+    min_precision: 0.5
+    save_plot: true
+    results_filename: "best_threshold.json"
+    plot_filename: "pr_curve_val.png"
+
+hydra:
+  run:
+    dir: logs/train/runs/rd/resnet3d_decoupled/${now:%Y-%m-%d_%H-%M-%S}

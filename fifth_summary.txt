@@ -1,0 +1,117 @@
+================================================================================
+  第五次更改说明 — Grad-CAM3D 可视化（500 张热力图）
+  权重来源：基础项目 resnet3d 15 epoch 最佳 checkpoint（非 decoupled）
+================================================================================
+
+一、目标
+--------------------------------------------------------------------------------
+  基于 first_summary / 基础 resnet3d 训练得到的 15 轮权重，用 3D Grad-CAM 观察
+  ResNet3D（topk pooling）在 RD / non-RD 视频上关注的空间区域。
+
+  交付物：
+    • 500 张热力图 PNG，每张对应不同视频
+    • 分层随机采样，RD 占比与全数据集一致（约 9.33%）
+    • 命名：rd_001.png … / non_rd_001.png …
+    • 输出目录：项目根目录 GradCAM/
+    • 附 manifest：GradCAM/gradcam_manifest.json
+
+
+二、权重与模型
+--------------------------------------------------------------------------------
+  默认 checkpoint（与 scripts/plot_training_results.py 一致）：
+    logs/train/runs/rd/resnet3d/2026-05-29_22-02-10/checkpoints/resnet3d/
+    resnet3d_best_epoch_015.ckpt
+
+  模型：ModelModule + ResNet3DClassifier（pooling=topk, topk_ratio=0.5）
+  Grad-CAM 挂钩层：enc.layer4（最后一组 3D 卷积特征，分类头之前）
+
+
+三、新增文件
+--------------------------------------------------------------------------------
+
+1. erdes/visualization/__init__.py
+   • 导出 GradCAM3D、overlay、save 工具。
+
+2. erdes/visualization/gradcam3d.py
+   • GradCAM3D：对 layer4 特征做 3D Grad-CAM，trilinear 上采样至输入尺寸。
+   • 按真实标签反向传播（RD→logit，non-RD→-logit）。
+   • save_heatmap_png：取时间维中间帧，灰度底图 + jet 热力叠加。
+
+3. scripts/generate_gradcam3d.py
+   • CLI 入口；默认生成 500 张图到 GradCAM/。
+   • 合并 train/val/test CSV，去重后分层抽样。
+   • 全数据集 RD 比例 ≈ 502/5381 ≈ 9.33% → 500 张中约 47 张 rd_*、453 张 non_rd_*。
+
+4. fifth_summary.txt（本文件）
+
+
+四、采样与命名规则
+--------------------------------------------------------------------------------
+  数据池：data/splits/non_rd_vs_rd/{train,val,test}.csv 合并去重（5381 条）。
+
+  分层抽样（seed=42）：
+    n_rd   = round(500 × 0.0933) ≈ 47
+    n_non  = 500 - n_rd ≈ 453
+
+  文件名（各类独立计数）：
+    label=1 → rd_001.png, rd_002.png, …
+    label=0 → non_rd_001.png, non_rd_002.png, …
+
+  说明：处理顺序随机，编号为类内顺序，非全局时间顺序。
+
+
+五、运行命令
+--------------------------------------------------------------------------------
+  cd C:\Users\ADMIN\Desktop\test_5
+
+  # 默认 500 张 → GradCAM/
+  D:\anaconda3\envs\erdes\python.exe scripts/generate_gradcam3d.py
+
+  # 自定义
+  python scripts/generate_gradcam3d.py ^
+    --num-samples 500 ^
+    --output-dir GradCAM ^
+    --ckpt-path logs/train/runs/rd/resnet3d/2026-05-29_22-02-10/checkpoints/resnet3d/resnet3d_best_epoch_015.ckpt ^
+    --data-root data/erdes ^
+    --device cuda
+
+  冒烟测试（2 张）：
+  python scripts/generate_gradcam3d.py --num-samples 2 --output-dir GradCAM_test
+
+
+六、输出说明
+--------------------------------------------------------------------------------
+  GradCAM/
+    rd_001.png … rd_047.png          （约 47 张，RD 类）
+    non_rd_001.png … non_rd_453.png  （约 453 张，non-RD 类）
+    gradcam_manifest.json            （文件名、原视频 path、label 对照）
+
+  单张图：96 帧视频的时间中帧（D=48）+ Grad-CAM 伪彩色叠加（alpha=0.45）。
+
+
+七、方法要点（Grad-CAM3D）
+--------------------------------------------------------------------------------
+  1. 前向：视频 [1,1,96,128,128] → ResNet3D 至 layer4 激活 A。
+  2. 反向：对目标类 score 求 ∂score/∂A，通道权重 w = GAP(梯度)。
+  3. CAM = ReLU(Σ_c w_c · A_c)，上采样至输入分辨率。
+  4. 可视化：中间时刻的 CAM 与灰度帧叠加。
+
+  与训练方法无关，仅用于解释已训权重；未修改 DecoupledModelModule 训练代码。
+
+
+八、性能与依赖
+--------------------------------------------------------------------------------
+  • 500 条视频需逐条解码 + 一次 backward，GPU 约 1–3 小时量级（视磁盘与显存而定）。
+  • 依赖：torch, matplotlib, pandas, tqdm（与现有 erdes 环境一致）。
+  • 建议单进程运行，勿与训练同时进行（显存/内存）。
+
+
+九、历次更改索引
+--------------------------------------------------------------------------------
+  first_summary.txt   — 两阶段解耦（原 50 epoch 设计）
+  second_summary.txt  — D 盘缓存 + fast 实验
+  third_summary.txt   — 单进程、进度日志、GPU resize
+  forth_summary.txt   — 15 epoch 解耦配置、停训原因
+  fifth_summary.txt   — Grad-CAM3D 可视化（本文件）
+
+================================================================================

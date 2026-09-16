@@ -1,0 +1,70 @@
+# @package _global_
+# MONAI SSL Swin-UNETR fast fine-tune: D: cache + bs4 + per-epoch encoder weights.
+# Prerequisite: python scripts/build_video_cache.py --split all
+
+defaults:
+  - override /data: erdes_cached
+  - override /model: swinunetr_monai_ssl
+  - override /callbacks: default
+  - override /trainer: default
+  - override /logger: tensorboard
+
+tags: ["erdes", "swinunetr", "monai_ssl", "fast", "15ep", "non_rd_vs_rd"]
+
+seed: 42
+
+trainer:
+  min_epochs: 15
+  max_epochs: 15
+  gradient_clip_val: 0.0
+  log_every_n_steps: 10
+
+model:
+  optimizer:
+    lr: 1.0e-4
+  compile: false
+  net:
+    use_checkpoint: true
+
+data:
+  use_um: false
+  use_cache: true
+  cache_dir: "D:/ERDES/cache/non_rd_vs_rd"
+  cache_mmap: true
+  batch_size: 4
+  num_workers: 0
+  train_csv: "data/splits/non_rd_vs_rd/train.csv"
+  val_csv: "data/splits/non_rd_vs_rd/val.csv"
+  test_csv: "data/splits/non_rd_vs_rd/test.csv"
+
+logger:
+  tensorboard:
+    prefix: "swinunetr_monai_ssl_fast"
+
+callbacks:
+  model_checkpoint:
+    dirpath: ${paths.output_dir}/checkpoints/swinunetr_monai_ssl
+    filename: "swinunetr_monai_ssl_best_epoch_{epoch:03d}"
+    monitor: "val/acc"
+    mode: "max"
+    save_top_k: 1
+    save_last: true
+    auto_insert_metric_name: false
+    verbose: true
+
+  encoder_epoch_checkpoint:
+    _target_: erdes.callbacks.encoder_epoch_checkpoint_callback.EncoderEpochCheckpointCallback
+    dirpath: ${paths.output_dir}/checkpoints/swinunetr_monai_ssl
+    filename: "encoder_epoch_{epoch:03d}.pth"
+    submodule: "backbone"
+
+  rich_progress_bar: null
+
+  training_progress:
+    _target_: erdes.callbacks.training_progress_callback.TrainingProgressCallback
+    log_every_n_steps: 10
+    progress_log_file: "D:/ERDES/logs/swinunetr_monai_ssl_fast_progress.log"
+
+hydra:
+  run:
+    dir: logs/train/runs/rd/swinunetr_monai_ssl_fast/${now:%Y-%m-%d_%H-%M-%S}

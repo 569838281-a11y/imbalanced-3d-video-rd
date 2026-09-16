@@ -1,0 +1,125 @@
+# @package _global_
+# Local UM + Decoupled 50ep with periodic ckpt (every 5 epochs) + easy resume.
+# Fresh start:
+#   python erdes/train.py experiment=non_rd_vs_rd/resnet3d_um_decoupled_50ep_local
+# Or: scripts/start_um_decoupled_50ep_local.ps1
+# Resume (auto if last.ckpt exists):
+#   scripts/start_um_decoupled_50ep_local.ps1
+#   python erdes/train.py experiment=non_rd_vs_rd/resnet3d_um_decoupled_50ep_local \
+#     ckpt_path=D:/ERDES/checkpoints/um_decoupled_50ep_local/last.ckpt
+
+defaults:
+  - override /data: erdes_um_cached
+  - override /model: resnet3d_decoupled
+  - override /callbacks: decoupled
+  - override /trainer: default
+  - override /logger: csv
+
+tags: ["erdes", "resnet3d", "um", "decoupled", "50ep", "local", "non_rd_vs_rd"]
+
+seed: 42
+
+# null = fresh; set to last.ckpt path to resume (script sets this automatically)
+ckpt_path: null
+
+# Finish all epochs; run test only after fit (needs complete base cache)
+test: false
+
+trainer:
+  min_epochs: 1
+  max_epochs: 50
+  gradient_clip_val: 1.0
+  enable_progress_bar: true
+  log_every_n_steps: 20
+  precision: 16-mixed
+  enable_checkpointing: true
+
+model:
+  train_csv: ${data.train_csv}
+  stage1_end_epoch: 38
+  stage2_start_epoch: 38
+  total_epochs: 50
+  logit_adjustment_tau: 1.0
+  mixup_alpha: 0.2
+  mixup_enabled: true
+  stage2_lr: 1.5e-05
+  decision_threshold: 0.5
+  gpu_preprocess: false
+  compute_train_metrics: true
+  metrics_csv_name: "epoch_metrics.csv"
+  compile: false
+  optimizer:
+    lr: 1.5e-05
+  scheduler:
+    patience: 10
+    mode: max
+
+data:
+  batch_size: 4
+  num_workers: 0
+  persistent_workers: false
+  use_cache: true
+  use_um: true
+  um_strength: 1.5
+  cache_dir: "D:/ERDES/cache/non_rd_vs_rd"
+  um_cache_dir: "D:/ERDES/cache/non_rd_vs_rd_um"
+  train_csv: "data/splits/non_rd_vs_rd/train.csv"
+  val_csv: "data/splits/non_rd_vs_rd/val.csv"
+  test_csv: "data/splits/non_rd_vs_rd/test.csv"
+
+logger:
+  csv:
+    name: "csv"
+    prefix: ""
+
+callbacks:
+  # Periodic full snapshots every 5 epochs (epochs 5/10/.../50) + last.ckpt for resume
+  model_checkpoint:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: "D:/ERDES/checkpoints/um_decoupled_50ep_local"
+    filename: "um_decoupled_ep{epoch:03d}_f1{val/f1:.4f}_rec{val/recall:.4f}"
+    monitor: "val/f1"
+    mode: "max"
+    every_n_epochs: 5
+    save_top_k: -1
+    save_last: true
+    auto_insert_metric_name: false
+    verbose: true
+    save_on_train_epoch_end: false
+    save_weights_only: false
+
+  # Also keep a rolling "best by val/f1" copy (checked every epoch)
+  model_checkpoint_best:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: "D:/ERDES/checkpoints/um_decoupled_50ep_local"
+    filename: "um_decoupled_best"
+    monitor: "val/f1"
+    mode: "max"
+    every_n_epochs: 1
+    save_top_k: 1
+    save_last: false
+    auto_insert_metric_name: false
+    verbose: true
+    save_on_train_epoch_end: false
+    save_weights_only: false
+
+  # Disabled: was stopping ~ep15-23 then crashing on uncached test set
+  early_stopping: null
+  model_summary: null
+  rich_progress_bar: null
+
+  training_progress:
+    _target_: erdes.callbacks.training_progress_callback.TrainingProgressCallback
+    log_every_n_steps: 20
+    progress_log_file: "D:/ERDES/logs/um_decoupled_50ep_progress.log"
+
+  pr_threshold_search:
+    _target_: erdes.callbacks.pr_threshold_callback.PRThresholdSearchCallback
+    min_precision: 0.5
+    save_plot: true
+    results_filename: "best_threshold.json"
+    plot_filename: "pr_curve_val.png"
+
+hydra:
+  run:
+    dir: logs/train/runs/rd/resnet3d_um_decoupled_50ep/${now:%Y-%m-%d_%H-%M-%S}

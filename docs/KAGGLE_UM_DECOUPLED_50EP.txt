@@ -1,0 +1,70 @@
+================================================================================
+  Kaggle 训练说明 — UM + Decoupled 50 epoch
+  对应配置: configs/experiment/non_rd_vs_rd/resnet3d_um_decoupled_50ep.yaml
+  启动脚本: scripts/kaggle_train_um_decoupled_50ep.py
+================================================================================
+
+一、训练内容
+--------------------------------------------------------------------------------
+  • 数据: 离线 UM 锐化缓存 (non_rd_vs_rd_um)
+  • 方法: 二阶段解耦 (Stage1 Mixup 全网 → Stage2 冻骨干 + Logit Adjustment)
+  • 轮次: 50 (Stage1: epoch 1-38, Stage2: epoch 39-50)
+  • 选模: 监控 val/f1，保存 top-3 + last
+  • 结束: PR 阈值搜索 (precision>=0.5 最大 recall)
+
+二、上传到 Kaggle 的 Dataset（路径可改）
+--------------------------------------------------------------------------------
+  1) erdes-um-cache
+       non_rd_vs_rd/*.pt          (可选，test 用)
+       non_rd_vs_rd_um/*.pt       (train/val 必用)
+  2) erdes-splits
+       non_rd_vs_rd/train.csv
+       non_rd_vs_rd/val.csv
+       non_rd_vs_rd/test.csv
+  3) 代码: 整个 test_5 仓库 → Notebook 里 git clone 或 Upload 到 /kaggle/working/test_5
+
+  本地若尚无 UM 缓存，先在本机执行:
+    python scripts/build_video_cache.py --split all --workers 4
+    python scripts/build_um_cache.py --split train_val --workers 4
+
+三、Notebook 中运行
+--------------------------------------------------------------------------------
+  !pip install -q lightning hydra-core rootutils monai torchmetrics rich
+  # 按 requirements.txt 补齐依赖
+
+  %cd /kaggle/working/test_5
+  !python scripts/kaggle_train_um_decoupled_50ep.py \
+      --um-cache /kaggle/input/erdes-um-cache/non_rd_vs_rd_um \
+      --base-cache /kaggle/input/erdes-um-cache/non_rd_vs_rd \
+      --splits /kaggle/input/erdes-splits/non_rd_vs_rd \
+      --batch-size 4 --max-epochs 50
+
+  若 Dataset 名称不同，改上面三个路径即可。
+
+四、详细指标（已加强，尤其召回率）
+--------------------------------------------------------------------------------
+  每个验证 epoch 控制台打印:
+    • Acc / F1 / Precision / Recall(=Sensitivity) / Specificity
+    • PR-AUC / ROC-AUC
+    • 混淆矩阵: TP FP FN TN
+    • 多阈值召回: thr=0.3/0.4/0.5/0.6/0.7 的 Recall、Precision、F1、混淆
+
+  落盘文件 (Hydra 输出目录下):
+    • epoch_metrics.csv     — 逐 epoch 全指标（含 recall_thr0.5 等）
+    • train_progress.log    — step 级进度
+    • best_threshold.json   — 训后 PR 搜索 (含 recall / TP/FP/FN/TN)
+    • pr_curve_val.png
+    • checkpoints/...       — 文件名含 f1 与 recall
+    • csv/                  — Lightning CSVLogger
+
+五、本机试跑（不经过 Kaggle）
+--------------------------------------------------------------------------------
+  python erdes/train.py experiment=non_rd_vs_rd/resnet3d_um_decoupled_50ep_local
+
+六、注意
+--------------------------------------------------------------------------------
+  • Kaggle 会话有时限；可开 Save Output，或定期把 checkpoints 拷到 Dataset
+  • early_stopping patience=15，可能不到 50 就停；需要跑满可改大或关掉
+  • GPU 建议 T4/P100 以上；OOM 时改 data.batch_size=2
+
+================================================================================
