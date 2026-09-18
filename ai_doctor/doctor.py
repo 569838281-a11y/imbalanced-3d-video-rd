@@ -1,4 +1,4 @@
-"""Cascade AI doctor: Stage-1 RD → Stage-2 macula → evidence + CaseResult."""
+"""Cascade AI doctor: Stage-1 RD → Stage-2 macula → Stage-3 subtype + evidence."""
 
 from __future__ import annotations
 
@@ -27,6 +27,9 @@ from ai_doctor.report import build_report  # noqa: E402
 from erdes.data.components.unsharp_masking import apply_unsharp_masking  # noqa: E402
 from erdes.data.components.utils import resize  # noqa: E402
 from erdes.models.components.factory import build_3d_architecture  # noqa: E402
+from erdes.models.components.monai_ssl_swinunetr import (  # noqa: E402
+    build_monai_ssl_swinunetr_classifier,
+)
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +42,20 @@ _DEFAULT_MACULA_CANDIDATES = [
     _ROOT / "weights" / "macula_unet3d_best.ckpt",
     Path("D:/ERDES/checkpoints/macula_unet3d_50ep_local/macula_unet3d_best.ckpt"),
 ]
+_DEFAULT_STAGE3_INTACT_CANDIDATES = [
+    _ROOT / "weights" / "stage3_intact_swin_ssl_protect_best.ckpt",
+    Path(
+        "D:/ERDES/checkpoints/stage3_intact_swin_ssl_protect_50ep/"
+        "stage3_intact_swin_ssl_protect_best.ckpt"
+    ),
+]
+_DEFAULT_STAGE3_DETACHED_CANDIDATES = [
+    _ROOT / "weights" / "stage3_detached_swin_ssl_protect_best.ckpt",
+    Path(
+        "D:/ERDES/checkpoints/stage3_detached_swin_ssl_protect_50ep/"
+        "stage3_detached_swin_ssl_protect_best.ckpt"
+    ),
+]
 
 
 def _first_existing(paths: List[Path]) -> Path:
@@ -50,9 +67,17 @@ def _first_existing(paths: List[Path]) -> Path:
 
 DEFAULT_RD_CKPT = _first_existing(_DEFAULT_RD_CANDIDATES)
 DEFAULT_MACULA_CKPT = _first_existing(_DEFAULT_MACULA_CANDIDATES)
+DEFAULT_STAGE3_INTACT_CKPT = _first_existing(_DEFAULT_STAGE3_INTACT_CANDIDATES)
+DEFAULT_STAGE3_DETACHED_CKPT = _first_existing(_DEFAULT_STAGE3_DETACHED_CANDIDATES)
 
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+
+# Stage-3 positive class (label=1) per trained splits
+STAGE3_INTACT_POS = "TD"  # temporal detachment
+STAGE3_INTACT_NEG = "ND"  # nasal detachment
+STAGE3_DETACHED_POS = "TD"
+STAGE3_DETACHED_NEG = "Bilateral"
 
 
 def _adapt_state_dict(state_dict: Dict[str, torch.Tensor], model: torch.nn.Module) -> Dict[str, torch.Tensor]:
@@ -82,6 +107,17 @@ def _adapt_state_dict(state_dict: Dict[str, torch.Tensor], model: torch.nn.Modul
     return adapted
 
 
+def _load_state_into(net: torch.nn.Module, ckpt_path: Path, device: str, tag: str) -> torch.nn.Module:
+    ckpt = torch.load(str(ckpt_path), map_location=device, weights_only=False)
+    state = _adapt_state_dict(ckpt["state_dict"], net)
+    missing, unexpected = net.load_state_dict(state, strict=False)
+    if missing:
+        log.warning("Missing keys (%s): %s", tag, missing[:8])
+    if unexpected:
+        log.warning("Unexpected keys (%s): %s", tag, unexpected[:8])
+    return net.to(device).eval()
+
+
 def _load_net(
     model_name: str,
     ckpt_path: Path,
@@ -92,67 +128,127 @@ def _load_net(
     net = build_3d_architecture(
         model_name, num_classes=1, pooling=pooling, topk_ratio=topk_ratio
     )
-    ckpt = torch.load(str(ckpt_path), map_location=device, weights_only=False)
-    state = _adapt_state_dict(ckpt["state_dict"], net)
-    missing, unexpected = net.load_state_dict(state, strict=False)
-    if missing:
-        log.warning("Missing keys (%s): %s", model_name, missing[:8])
-    if unexpected:
-        log.warning("Unexpected keys (%s): %s", model_name, unexpected[:8])
-    net = net.to(device).eval()
-    return net
+    return _load_state_into(net, ckpt_path, device, model_name)
 
 
-def disease_from_flags(has_rd: bool, macula_detached: Optional[bool]) -> Dict[str, str]:
+def _load_swin_stage3(
+    ckpt_path: Path,
+    device: str,
+    pooling: str = "topk",
+    topk_ratio: float = 0.5,
+) -> torch.nn.Module:
+    # Inference: weights come from the finetuned ckpt (no SSL reload).
+    net = build_monai_ssl_swinunetr_classifier(
+        num_classes=1,
+        pooling=pooling,
+        topk_ratio=topk_ratio,
+        load_ssl=False,
+        use_checkpoint=True,
+        feature_size=48,
+    )
+    return _load_state_into(net, ckpt_path, device, "swin_stage3")
+
+
+def _subtype_zh(code: Optional[str]) -> str:
+    return {
+        "TD": "颞侧脱离 (TD)",
+        "ND": "鼻侧脱离 (ND)",
+        "Bilateral": "双侧脱离 (Bilateral)",
+    }.get(code or "", "未知亚型")
+
+
+def disease_from_flags(
+    has_rd: bool,
+    macula_detached: Optional[bool],
+    subtype: Optional[str] = None,
+) -> Dict[str, str]:
     if not has_rd:
         return {
             "code": "non_rd",
             "label_zh": "未见明显视网膜脱离",
             "label_en": "No clear retinal detachment",
-            "summary_zh": "一阶段未检出视网膜脱离征象。当前无需进入黄斑分期；建议结合临床与其它检查综合判断。",
+            "summary_zh": "一阶段未检出视网膜脱离征象。当前无需进入黄斑/亚型分期；建议结合临床与其它检查综合判断。",
         }
+
     if macula_detached is True:
+        if subtype == "TD":
+            return {
+                "code": "rd_macula_detached_td",
+                "label_zh": "视网膜脱离（黄斑已脱离 · 颞侧 TD）",
+                "label_en": "RD, macula detached, temporal (TD)",
+                "summary_zh": "级联提示 RD + 黄斑脱离，三阶段倾向颞侧脱离（TD）。临床优先级通常更高，请尽快专科评估。",
+            }
+        if subtype == "Bilateral":
+            return {
+                "code": "rd_macula_detached_bilateral",
+                "label_zh": "视网膜脱离（黄斑已脱离 · 双侧）",
+                "label_en": "RD, macula detached, bilateral",
+                "summary_zh": "级联提示 RD + 黄斑脱离，三阶段倾向双侧脱离。请尽快专科面诊复核范围。",
+            }
         return {
             "code": "rd_macula_detached",
             "label_zh": "视网膜脱离（黄斑已脱离）",
             "label_en": "Retinal detachment with macular detachment",
-            "summary_zh": "一阶段检出视网膜脱离，二阶段提示黄斑已脱离。临床优先级通常更高，请尽快专科评估。",
+            "summary_zh": "一阶段检出视网膜脱离，二阶段提示黄斑已脱离。三阶段亚型未执行或不可用。",
+        }
+
+    if subtype == "TD":
+        return {
+            "code": "rd_macula_intact_td",
+            "label_zh": "视网膜脱离（黄斑完整 · 颞侧 TD）",
+            "label_en": "RD, macula intact, temporal (TD)",
+            "summary_zh": "级联提示 RD + 黄斑完整，三阶段倾向颞侧脱离（TD）。仍需专科随访与治疗决策。",
+        }
+    if subtype == "ND":
+        return {
+            "code": "rd_macula_intact_nd",
+            "label_zh": "视网膜脱离（黄斑完整 · 鼻侧 ND）",
+            "label_en": "RD, macula intact, nasal (ND)",
+            "summary_zh": "级联提示 RD + 黄斑完整，三阶段倾向鼻侧脱离（ND）。仍需专科随访与治疗决策。",
         }
     return {
         "code": "rd_macula_intact",
         "label_zh": "视网膜脱离（黄斑完整）",
         "label_en": "Retinal detachment with macula intact",
-        "summary_zh": "一阶段检出视网膜脱离，二阶段提示黄斑尚未脱离。仍需专科随访与治疗决策。",
+        "summary_zh": "一阶段检出视网膜脱离，二阶段提示黄斑尚未脱离。三阶段亚型未执行或不可用。",
     }
 
 
 class AIDoctor:
-    """Two-stage ocular ultrasound AI doctor with L2 evidence + L3 report."""
+    """Three-stage ocular ultrasound AI doctor with L2 evidence + L3 report."""
 
     def __init__(
         self,
         rd_ckpt: Union[str, Path] = DEFAULT_RD_CKPT,
         macula_ckpt: Union[str, Path] = DEFAULT_MACULA_CKPT,
+        stage3_intact_ckpt: Optional[Union[str, Path]] = DEFAULT_STAGE3_INTACT_CKPT,
+        stage3_detached_ckpt: Optional[Union[str, Path]] = DEFAULT_STAGE3_DETACHED_CKPT,
         rd_model_name: str = "resnet3d",
         macula_model_name: str = "unet3d",
         device: Optional[str] = None,
         video_size: Tuple[int, int, int] = (96, 128, 128),
         rd_threshold: float = 0.5,
         macula_threshold: float = 0.5,
+        stage3_threshold: float = 0.5,
         apply_um_for_rd: bool = True,
         um_strength: float = 1.5,
         pooling: str = "topk",
         topk_ratio: float = 0.5,
         explain: bool = True,
         evidence_top_k: int = 3,
+        enable_stage3: bool = True,
     ) -> None:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.video_size = video_size
         self.rd_threshold = rd_threshold
         self.macula_threshold = macula_threshold
+        self.stage3_threshold = stage3_threshold
         self.apply_um_for_rd = apply_um_for_rd
         self.um_strength = um_strength
         self.explain = explain
+        self.enable_stage3 = enable_stage3
+        self.pooling = pooling
+        self.topk_ratio = topk_ratio
         self.resize_tf = resize(video_size)
         self.rd_model_name = rd_model_name
         self.macula_model_name = macula_model_name
@@ -172,10 +268,48 @@ class AIDoctor:
         self.macula_model = _load_net(
             macula_model_name, macula_ckpt, self.device, pooling=pooling, topk_ratio=topk_ratio
         )
+
+        self.stage3_intact_ckpt = Path(stage3_intact_ckpt) if stage3_intact_ckpt else None
+        self.stage3_detached_ckpt = Path(stage3_detached_ckpt) if stage3_detached_ckpt else None
+        self._stage3_intact: Optional[torch.nn.Module] = None
+        self._stage3_detached: Optional[torch.nn.Module] = None
+
+        if enable_stage3:
+            if self.stage3_intact_ckpt and self.stage3_intact_ckpt.is_file():
+                log.info("Stage-3a ckpt ready: %s", self.stage3_intact_ckpt)
+            else:
+                log.warning("Stage-3a ckpt missing — intact subtype disabled")
+                self.stage3_intact_ckpt = None
+            if self.stage3_detached_ckpt and self.stage3_detached_ckpt.is_file():
+                log.info("Stage-3b ckpt ready: %s", self.stage3_detached_ckpt)
+            else:
+                log.warning("Stage-3b ckpt missing — detached subtype disabled")
+                self.stage3_detached_ckpt = None
+
         self.evidence_engine = EvidenceEngine(
             self.rd_model, self.device, top_k=evidence_top_k
         ) if explain else None
-        log.info("AI Doctor ready on %s (explain=%s)", self.device, explain)
+        log.info("AI Doctor ready on %s (explain=%s, stage3=%s)", self.device, explain, enable_stage3)
+
+    def _get_stage3_intact(self) -> Optional[torch.nn.Module]:
+        if not self.enable_stage3 or self.stage3_intact_ckpt is None:
+            return None
+        if self._stage3_intact is None:
+            log.info("Lazy-loading Stage-3a (intact TD vs ND)")
+            self._stage3_intact = _load_swin_stage3(
+                self.stage3_intact_ckpt, self.device, self.pooling, self.topk_ratio
+            )
+        return self._stage3_intact
+
+    def _get_stage3_detached(self) -> Optional[torch.nn.Module]:
+        if not self.enable_stage3 or self.stage3_detached_ckpt is None:
+            return None
+        if self._stage3_detached is None:
+            log.info("Lazy-loading Stage-3b (detached TD vs Bilateral)")
+            self._stage3_detached = _load_swin_stage3(
+                self.stage3_detached_ckpt, self.device, self.pooling, self.topk_ratio
+            )
+        return self._stage3_detached
 
     def _normalize_volume(self, video: torch.Tensor) -> torch.Tensor:
         if video.ndim != 4:
@@ -239,13 +373,44 @@ class AIDoctor:
             macula_prob: Optional[float] = None
             macula_detached: Optional[bool] = None
             stage2_ran = False
+            stage3_ran = False
+            stage3_branch: Optional[str] = None
+            subtype: Optional[str] = None
+            subtype_prob: Optional[float] = None
+            subtype_pos_label: Optional[str] = None
+
             if has_rd:
                 stage2_ran = True
                 macula_prob = float(torch.sigmoid(self.macula_model(video)).item())
                 macula_intact = macula_prob >= self.macula_threshold
                 macula_detached = not macula_intact
 
-        disease = disease_from_flags(has_rd, macula_detached)
+                if macula_detached is False:
+                    model3 = self._get_stage3_intact()
+                    if model3 is not None:
+                        stage3_ran = True
+                        stage3_branch = "intact_td_vs_nd"
+                        subtype_pos_label = STAGE3_INTACT_POS
+                        subtype_prob = float(torch.sigmoid(model3(video)).item())
+                        subtype = (
+                            STAGE3_INTACT_POS
+                            if subtype_prob >= self.stage3_threshold
+                            else STAGE3_INTACT_NEG
+                        )
+                elif macula_detached is True:
+                    model3 = self._get_stage3_detached()
+                    if model3 is not None:
+                        stage3_ran = True
+                        stage3_branch = "detached_td_vs_bilateral"
+                        subtype_pos_label = STAGE3_DETACHED_POS
+                        subtype_prob = float(torch.sigmoid(model3(video)).item())
+                        subtype = (
+                            STAGE3_DETACHED_POS
+                            if subtype_prob >= self.stage3_threshold
+                            else STAGE3_DETACHED_NEG
+                        )
+
+        disease = disease_from_flags(has_rd, macula_detached, subtype)
         tier = risk_tier(rd_prob, has_rd, macula_detached)
 
         evidence: List[Dict[str, Any]] = []
@@ -261,6 +426,8 @@ class AIDoctor:
             risk_tier=tier,
             macula_detached=macula_detached,
             stage2_ran=stage2_ran,
+            subtype=subtype,
+            stage3_ran=stage3_ran,
             evidence=evidence,
             disease_label_zh=disease["label_zh"],
         )
@@ -274,14 +441,26 @@ class AIDoctor:
             macula_detached=macula_detached,
             macula_intact_prob=macula_prob,
             stage2_ran=stage2_ran,
+            stage3_ran=stage3_ran,
+            stage3_branch=stage3_branch,
+            subtype=subtype,
+            subtype_prob=subtype_prob,
             evidence=[{k: v for k, v in e.items() if k != "overlay_png"} for e in evidence],
             report=report,
             disease=disease,
             rd_model_name="um_decoupled_50ep",
             macula_model_name="macula_unet3d_50ep",
+            stage3_model_name=(
+                "stage3_intact_swin_ssl"
+                if stage3_branch == "intact_td_vs_nd"
+                else (
+                    "stage3_detached_swin_ssl"
+                    if stage3_branch == "detached_td_vs_bilateral"
+                    else None
+                )
+            ),
         )
 
-        # Compact overlays for UI (keep base64 here, not in case_result audit blob)
         overlays = [
             {
                 "id": e["id"],
@@ -295,6 +474,13 @@ class AIDoctor:
             if e.get("overlay_png")
         ]
 
+        if not stage2_ran:
+            stage3_result_txt = "未执行（一阶段阴性）"
+        elif not stage3_ran:
+            stage3_result_txt = "未执行（权重不可用）"
+        else:
+            stage3_result_txt = _subtype_zh(subtype)
+
         return {
             "has_rd": has_rd,
             "rd_probability": round(rd_prob, 4),
@@ -306,6 +492,15 @@ class AIDoctor:
                 None if macula_prob is None else round(macula_prob, 4)
             ),
             "macula_threshold": self.macula_threshold if stage2_ran else None,
+            "stage3_ran": stage3_ran,
+            "stage3_branch": stage3_branch,
+            "subtype": subtype,
+            "subtype_label_zh": _subtype_zh(subtype) if subtype else None,
+            "subtype_probability": (
+                None if subtype_prob is None else round(subtype_prob, 4)
+            ),
+            "subtype_positive_class": subtype_pos_label,
+            "stage3_threshold": self.stage3_threshold if stage3_ran else None,
             "disease_code": disease["code"],
             "disease_label_zh": disease["label_zh"],
             "disease_label_en": disease["label_en"],
@@ -321,6 +516,11 @@ class AIDoctor:
                         if not stage2_ran
                         else ("黄斑已脱离" if macula_detached else "黄斑完整")
                     ),
+                },
+                {
+                    "stage": 3,
+                    "name": "解剖亚型",
+                    "result": stage3_result_txt,
                 },
             ],
             "findings": report["findings"],
@@ -353,5 +553,14 @@ def get_doctor() -> AIDoctor:
     if _doctor is None:
         rd = os.environ.get("AI_DOCTOR_RD_CKPT", str(DEFAULT_RD_CKPT))
         macula = os.environ.get("AI_DOCTOR_MACULA_CKPT", str(DEFAULT_MACULA_CKPT))
-        _doctor = AIDoctor(rd_ckpt=rd, macula_ckpt=macula)
+        s3i = os.environ.get("AI_DOCTOR_STAGE3_INTACT_CKPT", str(DEFAULT_STAGE3_INTACT_CKPT))
+        s3d = os.environ.get("AI_DOCTOR_STAGE3_DETACHED_CKPT", str(DEFAULT_STAGE3_DETACHED_CKPT))
+        enable = os.environ.get("AI_DOCTOR_ENABLE_STAGE3", "1") not in ("0", "false", "False")
+        _doctor = AIDoctor(
+            rd_ckpt=rd,
+            macula_ckpt=macula,
+            stage3_intact_ckpt=s3i,
+            stage3_detached_ckpt=s3d,
+            enable_stage3=enable,
+        )
     return _doctor

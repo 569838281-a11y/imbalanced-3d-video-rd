@@ -68,7 +68,7 @@
 
   function toneClass(code) {
     if (code === "non_rd") return "is-ok";
-    if (code === "rd_macula_intact") return "is-warn";
+    if (code && code.includes("intact")) return "is-warn";
     return "is-danger";
   }
 
@@ -80,6 +80,12 @@
   function tierLabel(t) {
     const map = { low: "低风险", mid: "中风险", high: "高风险" };
     return map[t] || t || "—";
+  }
+
+  function subtypeProbLabel(result) {
+    if (!result.stage3_ran || result.subtype_probability == null) return "—";
+    const pos = result.subtype_positive_class || "正类";
+    return `${pct(result.subtype_probability)}（P(${pos})）`;
   }
 
   function renderResult(result) {
@@ -98,6 +104,8 @@
     const rows = [
       ["一阶段 RD 概率", pct(result.rd_probability)],
       ["二阶段黄斑完整概率", pct(result.macula_intact_probability)],
+      ["三阶段亚型", result.subtype_label_zh || "—"],
+      ["三阶段正类概率", subtypeProbLabel(result)],
       ["病例 ID", result.case_result?.case_id || "—"],
       ["来源", result.source || "—"],
     ];
@@ -143,7 +151,7 @@
     files.forEach((f) => body.append("files", f, f.name));
 
     submitBtn.disabled = true;
-    setStatus("正在分析：级联判别 + Grad-CAM 依据引擎……");
+    setStatus("正在分析：三级级联 + Grad-CAM 依据引擎……");
 
     try {
       const res = await fetch("/api/diagnose", { method: "POST", body });

@@ -46,6 +46,11 @@ def health() -> dict:
         "device": doctor.device,
         "rd_threshold": doctor.rd_threshold,
         "macula_threshold": doctor.macula_threshold,
+        "stage3_threshold": doctor.stage3_threshold,
+        "stage3_enabled": doctor.enable_stage3,
+        "stage3_intact_ready": doctor.stage3_intact_ckpt is not None,
+        "stage3_detached_ready": doctor.stage3_detached_ckpt is not None,
+        "pipeline": ["rd", "macula", "subtype"],
     }
 
 

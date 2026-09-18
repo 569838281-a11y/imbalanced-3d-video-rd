@@ -10,6 +10,7 @@
 |------|------|
 | **RD 训练** | ResNet3D + Top-K；二阶段解耦（Mixup → 冻骨干 + Logit Adjustment）；Unsharp Masking（UM）缓存训练 |
 | **黄斑二级** | RD 阳性后门控的 macula detached vs intact（3D U-Net，本地 50 epoch） |
+| **Stage-3 子类** | 黄斑完整 → TD vs ND；黄斑脱离 → TD vs Bilateral（见 `docs/STAGE3_SUBTYPE.md`） |
 | **AI 医生** | `ai_doctor/`：上传超声 → 级联判别 → CaseResult → Findings/Impression + Grad-CAM 依据区 |
 | **权重** | `weights/` 下两个最佳 ckpt（Git LFS）：RD（UM+Decoupled）与黄斑 UNet3D |
 
@@ -41,8 +42,11 @@ scripts/start_um_decoupled_50ep_local.ps1
 # 黄斑二级 3D U-Net 50 epoch（本地，含 resume / 早停）
 python scripts/build_macula_cache.py
 scripts/start_macula_unet3d_50ep_local.ps1
-```
 
+# Stage-3 子类（黄斑门控后）：Intact→TD/ND，Detached→TD/Bilateral
+python scripts/build_stage3_splits.py
+scripts/start_stage3_both_50ep_local.ps1
+```
 实验对比备忘见 `docs/EXPERIMENTS.md`、`final_summary.txt`；技术流程见 `docs/TECH_PIPELINE_FINAL.txt`。
 
 ## AI 医生

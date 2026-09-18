@@ -1,0 +1,30 @@
+# MONAI Swin-UNETR + SSL weights, freeze-backbone-first then full fine-tune
+_target_: erdes.models.ssl_protect_finetune_module.SSLProtectFinetuneModule
+
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 1.0e-4
+  weight_decay: 0.0
+
+scheduler:
+  _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+  _partial_: true
+  mode: min
+  factor: 0.1
+  patience: 8
+
+net:
+  _target_: erdes.models.components.monai_ssl_swinunetr.build_monai_ssl_swinunetr_classifier
+  num_classes: 1
+  pooling: topk
+  topk_ratio: 0.5
+  load_ssl: true
+  ssl_weights_path: "weights/ssl_pretrained_weights.pth"
+  feature_size: 48
+  use_checkpoint: true
+
+# Stage A: freeze SSL backbone, train head; Stage B: unfreeze all
+freeze_epochs: 15
+finetune_lr: 1.0e-5
+compile: false

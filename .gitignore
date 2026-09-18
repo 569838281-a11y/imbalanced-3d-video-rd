@@ -116,11 +116,14 @@ GradCAM_test/
 __pycache__/
 ai_doctor_uploads/
 
-# Keep trained Lightning ckpts under weights/ (tracked via Git LFS)
-!weights/
-!weights/**
+# Keep trained Lightning ckpts under weights/ (tracked via Git LFS).
+# Keep ignoring *.pth (incl. weights/ssl_pretrained_weights.pth — download separately).
 *.ckpt
+!weights/
 !weights/*.ckpt
+
+# Local run flags
+SKIP_MACULA_SWIN_SSL_PROTECT
 
 # Upstream dataset marketing site (not part of this personal project)
 docs/index.html

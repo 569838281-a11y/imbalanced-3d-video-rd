@@ -5,7 +5,7 @@ from erdes.training.threshold_search import (
     find_best_threshold_under_precision_constraint,
     plot_pr_curve,
 )
-from erdes.training.backbone_utils import freeze_backbone, get_head_parameter_names, head_parameters
+from erdes.training.backbone_utils import freeze_backbone, get_head_parameter_names, head_parameters, unfreeze_all
 from erdes.training.mixup import mixup_data
 
 __all__ = [
@@ -16,6 +16,7 @@ __all__ = [
     "find_best_threshold_under_precision_constraint",
     "plot_pr_curve",
     "freeze_backbone",
+    "unfreeze_all",
     "get_head_parameter_names",
     "head_parameters",
     "mixup_data",

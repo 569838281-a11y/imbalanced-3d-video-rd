@@ -1,0 +1,16 @@
+{
+  "task": "macula_intact_td_vs_nd",
+  "gate": "macula_intact",
+  "label_names": {
+    "0": "ND",
+    "1": "TD"
+  },
+  "n_train": 143,
+  "n_val": 16,
+  "n_test": 40,
+  "patients": [
+    "102769",
+    "258033"
+  ],
+  "warning": "Single-patient-per-class in current tree; do not overclaim generalization."
+}

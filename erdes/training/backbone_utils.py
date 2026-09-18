@@ -53,3 +53,12 @@ def freeze_backbone(model: nn.Module) -> List[str]:
         param.requires_grad = name in head_names
 
     return head_names
+
+
+def unfreeze_all(model: nn.Module) -> int:
+    """Unfreeze every parameter; return count of trainable tensors."""
+    n = 0
+    for param in model.parameters():
+        param.requires_grad = True
+        n += 1
+    return n

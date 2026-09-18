@@ -1,0 +1,16 @@
+{
+  "task": "macula_detached_td_vs_bilateral",
+  "gate": "macula_detached",
+  "label_names": {
+    "0": "Bilateral",
+    "1": "TD"
+  },
+  "n_train": 217,
+  "n_val": 25,
+  "n_test": 61,
+  "patients": [
+    "405744",
+    "755384"
+  ],
+  "warning": "Single-patient-per-class in current tree; do not overclaim generalization."
+}

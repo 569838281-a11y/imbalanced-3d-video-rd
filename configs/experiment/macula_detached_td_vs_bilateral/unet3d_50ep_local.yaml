@@ -1,0 +1,108 @@
+# @package _global_
+# Stage-3b: after macula DETACHED → TD vs Bilateral (3D U-Net, 50ep local).
+# Labels: 1=TD, 0=Bilateral
+# Launch: scripts/start_stage3_detached_td_vs_bilateral_50ep_local.ps1
+#
+# WARNING: current data has ~1 patient per class — treat metrics as prototype only.
+
+defaults:
+  - override /data: erdes_stage3_detached_cached
+  - override /model: unet3d
+  - override /callbacks: default
+  - override /trainer: default
+  - override /logger: csv
+
+tags: ["erdes", "unet3d", "stage3", "macula_detached", "td_vs_bilateral", "50ep", "local"]
+
+seed: 42
+ckpt_path: null
+test: false
+
+trainer:
+  min_epochs: 1
+  max_epochs: 50
+  gradient_clip_val: 1.0
+  enable_progress_bar: true
+  log_every_n_steps: 10
+  precision: 16-mixed
+  enable_checkpointing: true
+
+model:
+  optimizer:
+    lr: 1.5e-05
+  scheduler:
+    _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+    _partial_: true
+    mode: min
+    factor: 0.1
+    patience: 8
+  compile: false
+  net:
+    model_name: unet3d
+    pooling: topk
+    topk_ratio: 0.5
+
+data:
+  batch_size: 2
+  num_workers: 0
+  use_cache: true
+  cache_dir: "D:/ERDES/cache/macula_detached_vs_intact"
+  train_csv: "data/splits/macula_detached_td_vs_bilateral/train.csv"
+  val_csv: "data/splits/macula_detached_td_vs_bilateral/val.csv"
+  test_csv: "data/splits/macula_detached_td_vs_bilateral/test.csv"
+
+logger:
+  csv:
+    name: "csv"
+    prefix: ""
+
+callbacks:
+  model_checkpoint:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: "D:/ERDES/checkpoints/stage3_detached_td_vs_bilateral_50ep_local"
+    filename: "stage3_detached_ep{epoch:03d}_f1{val/f1:.4f}_rec{val/sensitivity:.4f}"
+    monitor: "val/f1"
+    mode: "max"
+    every_n_epochs: 5
+    save_top_k: -1
+    save_last: true
+    auto_insert_metric_name: false
+    verbose: true
+    save_on_train_epoch_end: false
+    save_weights_only: false
+
+  model_checkpoint_best:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: "D:/ERDES/checkpoints/stage3_detached_td_vs_bilateral_50ep_local"
+    filename: "stage3_detached_td_vs_bilateral_best"
+    monitor: "val/f1"
+    mode: "max"
+    every_n_epochs: 1
+    save_top_k: 1
+    save_last: false
+    auto_insert_metric_name: false
+    verbose: true
+    save_on_train_epoch_end: false
+    save_weights_only: false
+
+  early_stopping:
+    _target_: lightning.pytorch.callbacks.EarlyStopping
+    monitor: "val/f1"
+    patience: 12
+    mode: "max"
+    min_delta: 0.001
+    check_on_train_epoch_end: false
+    strict: false
+    verbose: true
+
+  model_summary: null
+  rich_progress_bar: null
+
+  training_progress:
+    _target_: erdes.callbacks.training_progress_callback.TrainingProgressCallback
+    log_every_n_steps: 10
+    progress_log_file: "D:/ERDES/logs/stage3_detached_td_vs_bilateral_progress.log"
+
+hydra:
+  run:
+    dir: logs/train/runs/stage3/detached_td_vs_bilateral/${now:%Y-%m-%d_%H-%M-%S}

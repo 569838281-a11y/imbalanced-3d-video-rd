@@ -1,0 +1,109 @@
+# @package _global_
+# Stage-3a: Macula Intact → TD vs ND
+# Backbone: MONAI Swin-UNETR + SSL; freeze head-train then unfreeze fine-tune.
+# Best ckpt / early-stop use val/f1_finetune (Stage B / after unfreeze only).
+# Labels: 1=TD, 0=ND
+# Launch: scripts/start_stage3_intact_swin_ssl_protect_50ep_local.ps1
+
+defaults:
+  - override /data: erdes_stage3_intact_cached
+  - override /model: swinunetr_monai_ssl_protect
+  - override /callbacks: default
+  - override /trainer: default
+  - override /logger: csv
+
+tags: ["erdes", "swinunetr", "monai_ssl", "ssl_protect", "stage3", "intact", "td_vs_nd", "50ep"]
+
+seed: 42
+ckpt_path: null
+test: false
+
+trainer:
+  # Must reach Stage B (unfreeze at freeze_epochs) before early-stop can end.
+  min_epochs: 16
+  max_epochs: 50
+  gradient_clip_val: 1.0
+  enable_progress_bar: true
+  log_every_n_steps: 10
+  precision: 16-mixed
+  enable_checkpointing: true
+
+model:
+  freeze_epochs: 15
+  finetune_lr: 1.0e-5
+  optimizer:
+    lr: 1.0e-4
+  compile: false
+  net:
+    # true: lower VRAM after Stage-B unfreeze (8GB-safe)
+    use_checkpoint: true
+    load_ssl: true
+    ssl_weights_path: "weights/ssl_pretrained_weights.pth"
+    pooling: topk
+    topk_ratio: 0.5
+
+data:
+  batch_size: 2
+  num_workers: 0
+  use_cache: true
+  cache_dir: "D:/ERDES/cache/macula_detached_vs_intact"
+  train_csv: "data/splits/macula_intact_td_vs_nd/train.csv"
+  val_csv: "data/splits/macula_intact_td_vs_nd/val.csv"
+  test_csv: "data/splits/macula_intact_td_vs_nd/test.csv"
+
+logger:
+  csv:
+    name: "csv"
+    prefix: ""
+
+callbacks:
+  model_checkpoint:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: "D:/ERDES/checkpoints/stage3_intact_swin_ssl_protect_50ep"
+    filename: "stage3_intact_swin_ep{epoch:03d}_f1{val/f1:.4f}"
+    monitor: "val/f1"
+    mode: "max"
+    every_n_epochs: 5
+    save_top_k: -1
+    save_last: true
+    auto_insert_metric_name: false
+    verbose: true
+    save_on_train_epoch_end: false
+    save_weights_only: false
+
+  # Best model: ONLY after unfreeze (StageB* callbacks + val/f1_finetune).
+  model_checkpoint_best:
+    _target_: erdes.callbacks.stage_b_monitor.StageBModelCheckpoint
+    dirpath: "D:/ERDES/checkpoints/stage3_intact_swin_ssl_protect_50ep"
+    filename: "stage3_intact_swin_ssl_protect_best"
+    monitor: "val/f1_finetune"
+    mode: "max"
+    every_n_epochs: 1
+    save_top_k: 1
+    save_last: false
+    auto_insert_metric_name: false
+    verbose: true
+    save_on_train_epoch_end: false
+    save_weights_only: false
+
+  early_stopping:
+    _target_: erdes.callbacks.stage_b_monitor.StageBEarlyStopping
+    monitor: "val/f1_finetune"
+    patience: 12
+    mode: "max"
+    min_delta: 0.001
+    check_on_train_epoch_end: false
+    strict: true
+    verbose: true
+
+  model_summary: null
+  rich_progress_bar: null
+
+  training_progress:
+    _target_: erdes.callbacks.training_progress_callback.TrainingProgressCallback
+    log_every_n_steps: 10
+    progress_log_file: "D:/ERDES/logs/stage3_intact_swin_ssl_protect_progress.log"
+
+hydra:
+  run:
+    dir: logs/train/runs/stage3/intact_swin_ssl_protect/${now:%Y-%m-%d_%H-%M-%S}

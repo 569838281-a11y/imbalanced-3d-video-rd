@@ -101,8 +101,60 @@ body {
   color: rgba(238, 247, 244, 0.78);
 }
 
+.guide {
+  margin-top: clamp(1.75rem, 4vh, 2.75rem);
+  padding: 1.25rem 1.35rem 1.4rem;
+  max-width: 40rem;
+  background:
+    linear-gradient(165deg, rgba(14, 36, 42, 0.88), rgba(8, 22, 28, 0.92));
+  border-left: 3px solid rgba(127, 212, 196, 0.55);
+  animation: rise 1s 0.06s ease both;
+}
+
+.guide-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+  font-weight: 500;
+  color: #c8ebe4;
+}
+
+.guide-lede {
+  margin: 0.55rem 0 0;
+  font-size: 0.92rem;
+  line-height: 1.5;
+  color: rgba(238, 247, 244, 0.68);
+}
+
+.guide-list {
+  margin: 0.9rem 0 0;
+  padding: 0 0 0 1.15rem;
+  display: grid;
+  gap: 0.65rem;
+  color: rgba(238, 247, 244, 0.82);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.guide-list strong {
+  color: #9fd9cf;
+  font-weight: 600;
+}
+
+.guide-list code {
+  font-size: 0.84em;
+  color: #b8e8de;
+}
+
+.guide-note {
+  margin: 0.95rem 0 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: rgba(201, 133, 42, 0.95);
+}
+
 .workspace {
-  margin-top: clamp(2rem, 5vh, 3.25rem);
+  margin-top: clamp(1.5rem, 4vh, 2.5rem);
   display: grid;
   gap: 1.25rem;
   animation: rise 1.05s 0.12s ease both;

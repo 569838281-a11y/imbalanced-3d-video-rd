@@ -7,6 +7,13 @@ from typing import Any, Dict, List, Optional
 from ai_doctor.case_result import DISCLAIMER_ZH
 
 
+_SUBTYPE_ZH = {
+    "TD": "颞侧脱离 (TD)",
+    "ND": "鼻侧脱离 (ND)",
+    "Bilateral": "双侧脱离 (Bilateral)",
+}
+
+
 def build_report(
     *,
     has_rd: bool,
@@ -16,6 +23,8 @@ def build_report(
     stage2_ran: bool,
     evidence: List[Dict[str, Any]],
     disease_label_zh: str,
+    subtype: Optional[str] = None,
+    stage3_ran: bool = False,
 ) -> Dict[str, Any]:
     frames = [e["frame_idx"] for e in evidence]
     frame_phrase = (
@@ -25,7 +34,6 @@ def build_report(
     )
     cam_texts = [e["text"] for e in evidence[:3]]
 
-    # Findings = objective imaging language only
     findings_parts = [
         f"眼部超声体积已按训练分布重采样；依据引擎关注帧：第 {frame_phrase} 帧。",
     ]
@@ -45,23 +53,38 @@ def build_report(
         findings_parts.append("二阶段级联提示黄斑受累倾向（影像分类结果，非裂孔定位）。")
     elif stage2_ran and macula_detached is False:
         findings_parts.append("二阶段级联提示黄斑完整性相对保留。")
+    if stage3_ran and subtype:
+        findings_parts.append(
+            f"三阶段解剖亚型倾向：{_SUBTYPE_ZH.get(subtype, subtype)}（原型模型，需临床复核）。"
+        )
 
     findings = " ".join(findings_parts)
 
-    # Impression = tendency + uncertainty, not etiology
     if not has_rd:
         impression = (
             f"倾向印象：{disease_label_zh}（RD 概率 {rd_prob:.1%}，风险分层 {risk_tier}）。"
             "当前证据不支持作出视网膜脱离的肯定诊断；若症状持续或出现闪光/遮挡，仍需眼科评估。"
         )
     elif macula_detached is True:
+        extra = (
+            f"三阶段提示 {_SUBTYPE_ZH.get(subtype, subtype)}。"
+            if stage3_ran and subtype
+            else ""
+        )
         impression = (
             f"倾向印象：{disease_label_zh}（RD 概率 {rd_prob:.1%}，风险分层 {risk_tier}）。"
+            f"{extra}"
             "级联结果提示黄斑可能已受累；请尽快专科面诊，勿将本输出视为手术指征本身。"
         )
     else:
+        extra = (
+            f"三阶段提示 {_SUBTYPE_ZH.get(subtype, subtype)}。"
+            if stage3_ran and subtype
+            else ""
+        )
         impression = (
             f"倾向印象：{disease_label_zh}（RD 概率 {rd_prob:.1%}，风险分层 {risk_tier}）。"
+            f"{extra}"
             "级联结果提示黄斑可能尚未脱离，但仍属视网膜脱离相关高风险范畴，需专科确认。"
         )
 

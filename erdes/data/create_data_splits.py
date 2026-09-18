@@ -60,6 +60,16 @@ TASKS = {
             "Retinal_Detachment/Macula_Intact/TD",
         ],
     },
+    # Stage-3 (macula-gated subtype). Prefer scripts/build_stage3_splits.py
+    # which also writes meta.json + patient leakage warnings.
+    "macula_intact_td_vs_nd": {
+        0: ["Retinal_Detachment/Macula_Intact/ND"],
+        1: ["Retinal_Detachment/Macula_Intact/TD"],
+    },
+    "macula_detached_td_vs_bilateral": {
+        0: ["Retinal_Detachment/Macula_Detached/Bilateral"],
+        1: ["Retinal_Detachment/Macula_Detached/TD"],
+    },
     "normal_vs_pvd": {
         0: ["Non_Retinal_Detachment/Normal"],
         1: ["Non_Retinal_Detachment/Posterior_Vitreous_Detachment"],

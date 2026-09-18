@@ -17,15 +17,43 @@
     <header class="brand-block">
       <p class="brand">ERDES</p>
       <h1 class="headline">AI Doctor</h1>
-      <p class="lede">上传眼部超声。级联判别之后，依据引擎给出关键帧与关注区——结论、依据、报告分开呈现。</p>
+      <p class="lede">上传眼部超声视频。三级级联：脱离筛查 → 黄斑状态 → 解剖亚型；结论、依据、报告分区呈现。</p>
     </header>
+
+    <section class="guide" aria-label="超声视频放入要求">
+      <h2 class="guide-title">放入前请对齐 ERDES 预处理要求</h2>
+      <p class="guide-lede">依据《视网膜脱离急诊分诊与黄斑状态的时空视频分类基准》中的采集与预处理说明整理。未按下列方式裁剪时，模型准确率可能明显下降。</p>
+      <ol class="guide-list">
+        <li>
+          <strong>内容范围</strong>
+          线阵探头床旁眼超声（POCUS）短视频；画面应覆盖眼球感兴趣区（ROI）：前房、晶状体、玻璃体、视网膜与视神经。
+        </li>
+        <li>
+          <strong>必须裁剪到眼球 ROI</strong>
+          去掉设备文字叠加、周边软组织与屏显信息。勿仅依赖固定「中心 256×256」裁剪——眼球偏边、离轴、运动伪影时中心裁会失败。推荐按整段视频统一框选眼球区域（论文用 YOLOv8 取最高置信度框作为整段作物区）。
+        </li>
+        <li>
+          <strong>尺寸与填充</strong>
+          裁剪后若宽/高不能被 16 整除，用黑色像素填充至 16 的倍数，以适配 ViT/Swin 类模型。本系统读入后会再重采样到训练尺寸 <code>D×H×W = 96×128×128</code>。
+        </li>
+        <li>
+          <strong>时长与格式</strong>
+          优先单个去标识化 MP4/AVI/MOV 片段（ERDES 中位时长约 3 秒）。也可上传按时间排序的连续帧图（jpg/png）。一次只传一个视频，或只传图像序列。
+        </li>
+        <li>
+          <strong>隐私</strong>
+          上传前确认已去除 PHI/姓名/病历号等叠加文字；本工具不做自动去标识。
+        </li>
+      </ol>
+      <p class="guide-note">本页不做自动 ROI 检测。请先按上述方式裁好再上传，使输入分布贴近 ERDES 训练集。</p>
+    </section>
 
     <section class="workspace" aria-label="上传与诊断">
       <form id="upload-form" class="dropzone" tabindex="0">
         <input id="file-input" type="file" accept=".mp4,.avi,.mov,.mkv,.webm,.jpg,.jpeg,.png,.bmp,.tif,.tiff,.webp" multiple hidden />
         <div class="drop-inner">
-          <p class="drop-title">拖入超声文件，或点击选择</p>
-          <p class="drop-hint">支持 mp4 / avi / mov，或若干帧图像（jpg / png）</p>
+          <p class="drop-title">拖入已裁剪的超声视频，或点击选择</p>
+          <p class="drop-hint">mp4 / avi / mov · 或连续帧 jpg / png · 须已裁至眼球 ROI</p>
           <p id="file-list" class="file-list" hidden></p>
         </div>
         <button type="submit" id="submit-btn" class="cta" disabled>开始诊断</button>
